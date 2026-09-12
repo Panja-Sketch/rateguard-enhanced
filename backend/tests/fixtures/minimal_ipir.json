@@ -1,0 +1,116 @@
+{
+  "ipir_version": "0.1",
+  "id": "minimal_rate_plan",
+  "name": "Minimal Generic Rate Plan",
+  "version": "1.0.0",
+  "product": {
+    "id": "MIN_HO3",
+    "name": "Minimal Homeowners Product",
+    "line": "HOMEOWNERS",
+    "jurisdiction": {
+      "country": "US",
+      "state_or_province": "AZ"
+    }
+  },
+  "effective_period": {
+    "start": "2026-01-01"
+  },
+  "transaction_types": [
+    "NEW_BUSINESS",
+    "RENEWAL"
+  ],
+  "inputs": [
+    {
+      "id": "roof_age",
+      "name": "Age of Roof",
+      "data_type": "INTEGER",
+      "required": true,
+      "minimum": 0,
+      "maximum": 100
+    }
+  ],
+  "constants": [
+    {
+      "id": "base_rate",
+      "name": "Base Premium Rate",
+      "value": "500.00"
+    }
+  ],
+  "tables": [
+    {
+      "id": "roof_age_factor",
+      "name": "Roof Age Factor Table",
+      "dimensions": [
+        {
+          "input_ref": "roof_age",
+          "lookup_type": "RANGE"
+        }
+      ],
+      "rows": [
+        {
+          "matches": [
+            {
+              "minimum": "0",
+              "maximum": "10",
+              "include_minimum": true,
+              "include_maximum": true
+            }
+          ],
+          "value": "1.00"
+        },
+        {
+          "matches": [
+            {
+              "minimum": "11",
+              "maximum": "20",
+              "include_minimum": true,
+              "include_maximum": true
+            }
+          ],
+          "value": "1.10"
+        },
+        {
+          "matches": [
+            {
+              "minimum": "21",
+              "maximum": null,
+              "include_minimum": true,
+              "include_maximum": true
+            }
+          ],
+          "value": "1.35"
+        }
+      ]
+    }
+  ],
+  "calculations": [
+    {
+      "id": "calculated_premium",
+      "name": "Calculated Premium",
+      "expression": {
+        "operator": "MULTIPLY",
+        "operands": [
+          {
+            "ref": "base_rate"
+          },
+          {
+            "ref": "roof_age_factor"
+          }
+        ]
+      },
+      "depends_on": [
+        "base_rate",
+        "roof_age_factor"
+      ]
+    }
+  ],
+  "outputs": [
+    {
+      "id": "final_premium",
+      "name": "Final Premium",
+      "source_ref": "calculated_premium",
+      "currency": "USD"
+    }
+  ]
+}
+

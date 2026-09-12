@@ -1,0 +1,988 @@
+{
+  "ipir_version": "0.1",
+  "id": "AZ_HO3_MULTI_RISK_DRIFT",
+  "name": "Arizona Homeowners HO3 Multi-Risk Drift Source B",
+  "version": "test-multi-risk-drift",
+  "product": {
+    "id": "AZ_HO3",
+    "name": "Arizona Homeowners HO3 Product",
+    "line": "HOMEOWNERS",
+    "form": "HO3",
+    "jurisdiction": {
+      "country": "US",
+      "state_or_province": "AZ"
+    }
+  },
+  "effective_period": {
+    "start": "2026-09-01",
+    "end": null
+  },
+  "transaction_types": [
+    "NEW_BUSINESS",
+    "RENEWAL"
+  ],
+  "inputs": [
+    {
+      "id": "territory",
+      "name": "Rating Territory Code",
+      "data_type": "STRING",
+      "required": true,
+      "description": "Arizona rating territory code (T01 through T20)",
+      "unit": null,
+      "allowed_values": [
+        "T01",
+        "T02",
+        "T03",
+        "T04",
+        "T05",
+        "T06",
+        "T07",
+        "T08",
+        "T09",
+        "T10",
+        "T11",
+        "T12",
+        "T13",
+        "T14",
+        "T15",
+        "T16",
+        "T17",
+        "T18",
+        "T19",
+        "T20"
+      ],
+      "minimum": null,
+      "maximum": null,
+      "provenance": null
+    },
+    {
+      "id": "roof_age",
+      "name": "Roof Age (Years)",
+      "data_type": "INTEGER",
+      "required": true,
+      "description": "Age of roof in years (0 to 50)",
+      "unit": null,
+      "allowed_values": null,
+      "minimum": "0",
+      "maximum": "50",
+      "provenance": null
+    },
+    {
+      "id": "deductible",
+      "name": "Policy Deductible Amount ($)",
+      "data_type": "MONEY",
+      "required": true,
+      "description": "Policy all-peril deductible ($500, $1000, $2500, $5000)",
+      "unit": null,
+      "allowed_values": [
+        "500",
+        "1000",
+        "2500",
+        "5000"
+      ],
+      "minimum": null,
+      "maximum": null,
+      "provenance": null
+    },
+    {
+      "id": "protection_class",
+      "name": "Public Protection Class",
+      "data_type": "INTEGER",
+      "required": true,
+      "description": "ISO public protection class (1 to 10)",
+      "unit": null,
+      "allowed_values": null,
+      "minimum": "1",
+      "maximum": "10",
+      "provenance": null
+    },
+    {
+      "id": "construction_type",
+      "name": "Building Construction Type",
+      "data_type": "STRING",
+      "required": true,
+      "description": "Construction type (FRAME, MASONRY, FIRE_RESISTIVE, SUPERIOR)",
+      "unit": null,
+      "allowed_values": [
+        "FRAME",
+        "MASONRY",
+        "FIRE_RESISTIVE",
+        "SUPERIOR"
+      ],
+      "minimum": null,
+      "maximum": null,
+      "provenance": null
+    },
+    {
+      "id": "dwelling_limit",
+      "name": "Coverage A Dwelling Limit ($)",
+      "data_type": "MONEY",
+      "required": true,
+      "description": "Coverage A Dwelling replacement cost limit ($100,000 to $2,000,000)",
+      "unit": null,
+      "allowed_values": null,
+      "minimum": "100000",
+      "maximum": "2000000",
+      "provenance": null
+    },
+    {
+      "id": "claims_free",
+      "name": "Claims-Free Prior Years",
+      "data_type": "BOOLEAN",
+      "required": true,
+      "description": "Flag indicating policyholder has no claims in prior 3 years",
+      "unit": null,
+      "allowed_values": null,
+      "minimum": null,
+      "maximum": null,
+      "provenance": null
+    },
+    {
+      "id": "multi_policy",
+      "name": "Multi-Policy Discount Eligible",
+      "data_type": "BOOLEAN",
+      "required": true,
+      "description": "Flag indicating companion auto or umbrella policy",
+      "unit": null,
+      "allowed_values": null,
+      "minimum": null,
+      "maximum": null,
+      "provenance": null
+    }
+  ],
+  "constants": [
+    {
+      "id": "base_rate",
+      "name": "Base Premium Rate",
+      "value": "650.00",
+      "description": null,
+      "effective_period": null,
+      "provenance": null
+    },
+    {
+      "id": "MINIMUM_PREMIUM",
+      "name": "Minimum Policy Premium Floor",
+      "value": "575.00",
+      "description": null,
+      "effective_period": null,
+      "provenance": null
+    },
+    {
+      "id": "POLICY_FEE",
+      "name": "Statutory Policy Fee",
+      "value": "25.00",
+      "description": null,
+      "effective_period": null,
+      "provenance": null
+    }
+  ],
+  "tables": [
+    {
+      "id": "territory_factor",
+      "name": "Territory Base Factor Table",
+      "dimensions": [
+        {
+          "input_ref": "territory",
+          "lookup_type": "EXACT"
+        }
+      ],
+      "rows": [
+        {
+          "matches": [
+            {
+              "value": "T01"
+            }
+          ],
+          "value": "1.00"
+        },
+        {
+          "matches": [
+            {
+              "value": "T02"
+            }
+          ],
+          "value": "1.01"
+        },
+        {
+          "matches": [
+            {
+              "value": "T03"
+            }
+          ],
+          "value": "1.02"
+        },
+        {
+          "matches": [
+            {
+              "value": "T04"
+            }
+          ],
+          "value": "1.04"
+        },
+        {
+          "matches": [
+            {
+              "value": "T05"
+            }
+          ],
+          "value": "1.05"
+        },
+        {
+          "matches": [
+            {
+              "value": "T06"
+            }
+          ],
+          "value": "1.06"
+        },
+        {
+          "matches": [
+            {
+              "value": "T07"
+            }
+          ],
+          "value": "1.07"
+        },
+        {
+          "matches": [
+            {
+              "value": "T08"
+            }
+          ],
+          "value": "1.09"
+        },
+        {
+          "matches": [
+            {
+              "value": "T09"
+            }
+          ],
+          "value": "1.10"
+        },
+        {
+          "matches": [
+            {
+              "value": "T10"
+            }
+          ],
+          "value": "1.11"
+        },
+        {
+          "matches": [
+            {
+              "value": "T11"
+            }
+          ],
+          "value": "1.12"
+        },
+        {
+          "matches": [
+            {
+              "value": "T12"
+            }
+          ],
+          "value": "1.14"
+        },
+        {
+          "matches": [
+            {
+              "value": "T13"
+            }
+          ],
+          "value": "1.15"
+        },
+        {
+          "matches": [
+            {
+              "value": "T14"
+            }
+          ],
+          "value": "1.16"
+        },
+        {
+          "matches": [
+            {
+              "value": "T15"
+            }
+          ],
+          "value": "1.18"
+        },
+        {
+          "matches": [
+            {
+              "value": "T16"
+            }
+          ],
+          "value": "1.19"
+        },
+        {
+          "matches": [
+            {
+              "value": "T17"
+            }
+          ],
+          "value": "1.20"
+        },
+        {
+          "matches": [
+            {
+              "value": "T18"
+            }
+          ],
+          "value": "1.21"
+        },
+        {
+          "matches": [
+            {
+              "value": "T19"
+            }
+          ],
+          "value": "1.23"
+        },
+        {
+          "matches": [
+            {
+              "value": "T20"
+            }
+          ],
+          "value": "1.24"
+        }
+      ],
+      "effective_period": null,
+      "provenance": null
+    },
+    {
+      "id": "roof_age_factor",
+      "name": "Roof Age Factor Table",
+      "dimensions": [
+        {
+          "input_ref": "roof_age",
+          "lookup_type": "RANGE"
+        }
+      ],
+      "rows": [
+        {
+          "matches": [
+            {
+              "minimum": "0",
+              "maximum": "5",
+              "include_minimum": true,
+              "include_maximum": true
+            }
+          ],
+          "value": "0.90"
+        },
+        {
+          "matches": [
+            {
+              "minimum": "6",
+              "maximum": "10",
+              "include_minimum": true,
+              "include_maximum": true
+            }
+          ],
+          "value": "1.00"
+        },
+        {
+          "matches": [
+            {
+              "minimum": "11",
+              "maximum": "20",
+              "include_minimum": true,
+              "include_maximum": true
+            }
+          ],
+          "value": "1.10"
+        },
+        {
+          "matches": [
+            {
+              "minimum": "21",
+              "maximum": "30",
+              "include_minimum": true,
+              "include_maximum": true
+            }
+          ],
+          "value": "1.35"
+        },
+        {
+          "matches": [
+            {
+              "minimum": "31",
+              "maximum": "50",
+              "include_minimum": true,
+              "include_maximum": true
+            }
+          ],
+          "value": "1.50"
+        }
+      ],
+      "effective_period": null,
+      "provenance": null
+    },
+    {
+      "id": "deductible_factor",
+      "name": "Deductible Factor Table",
+      "dimensions": [
+        {
+          "input_ref": "deductible",
+          "lookup_type": "EXACT"
+        }
+      ],
+      "rows": [
+        {
+          "matches": [
+            {
+              "value": "500"
+            }
+          ],
+          "value": "1.10"
+        },
+        {
+          "matches": [
+            {
+              "value": "1000"
+            }
+          ],
+          "value": "1.00"
+        },
+        {
+          "matches": [
+            {
+              "value": "2500"
+            }
+          ],
+          "value": "0.90"
+        },
+        {
+          "matches": [
+            {
+              "value": "5000"
+            }
+          ],
+          "value": "0.70"
+        }
+      ],
+      "effective_period": null,
+      "provenance": null
+    },
+    {
+      "id": "protection_class_factor",
+      "name": "Protection Class Factor Table",
+      "dimensions": [
+        {
+          "input_ref": "protection_class",
+          "lookup_type": "RANGE"
+        }
+      ],
+      "rows": [
+        {
+          "matches": [
+            {
+              "minimum": "1",
+              "maximum": "3",
+              "include_minimum": true,
+              "include_maximum": true
+            }
+          ],
+          "value": "0.95"
+        },
+        {
+          "matches": [
+            {
+              "minimum": "4",
+              "maximum": "6",
+              "include_minimum": true,
+              "include_maximum": true
+            }
+          ],
+          "value": "1.00"
+        },
+        {
+          "matches": [
+            {
+              "minimum": "7",
+              "maximum": "8",
+              "include_minimum": true,
+              "include_maximum": true
+            }
+          ],
+          "value": "1.10"
+        },
+        {
+          "matches": [
+            {
+              "minimum": "9",
+              "maximum": "10",
+              "include_minimum": true,
+              "include_maximum": true
+            }
+          ],
+          "value": "1.25"
+        }
+      ],
+      "effective_period": null,
+      "provenance": null
+    },
+    {
+      "id": "construction_factor",
+      "name": "Construction Factor Table",
+      "dimensions": [
+        {
+          "input_ref": "construction_type",
+          "lookup_type": "EXACT"
+        }
+      ],
+      "rows": [
+        {
+          "matches": [
+            {
+              "value": "FRAME"
+            }
+          ],
+          "value": "1.10"
+        },
+        {
+          "matches": [
+            {
+              "value": "MASONRY"
+            }
+          ],
+          "value": "0.95"
+        },
+        {
+          "matches": [
+            {
+              "value": "FIRE_RESISTIVE"
+            }
+          ],
+          "value": "0.85"
+        },
+        {
+          "matches": [
+            {
+              "value": "SUPERIOR"
+            }
+          ],
+          "value": "0.80"
+        }
+      ],
+      "effective_period": null,
+      "provenance": null
+    },
+    {
+      "id": "dwelling_limit_factor",
+      "name": "Dwelling Limit Factor Table",
+      "dimensions": [
+        {
+          "input_ref": "dwelling_limit",
+          "lookup_type": "RANGE"
+        }
+      ],
+      "rows": [
+        {
+          "matches": [
+            {
+              "minimum": "100000",
+              "maximum": "250000",
+              "include_minimum": true,
+              "include_maximum": true
+            }
+          ],
+          "value": "0.85"
+        },
+        {
+          "matches": [
+            {
+              "minimum": "250001",
+              "maximum": "500000",
+              "include_minimum": true,
+              "include_maximum": true
+            }
+          ],
+          "value": "1.15"
+        },
+        {
+          "matches": [
+            {
+              "minimum": "500001",
+              "maximum": "1000000",
+              "include_minimum": true,
+              "include_maximum": true
+            }
+          ],
+          "value": "1.20"
+        },
+        {
+          "matches": [
+            {
+              "minimum": "1000001",
+              "maximum": "2000000",
+              "include_minimum": true,
+              "include_maximum": true
+            }
+          ],
+          "value": "1.50"
+        }
+      ],
+      "effective_period": null,
+      "provenance": null
+    },
+    {
+      "id": "territory_construction_adjustment",
+      "name": "2D Territory-Construction Adjustment Table",
+      "dimensions": [
+        {
+          "input_ref": "territory",
+          "lookup_type": "EXACT"
+        },
+        {
+          "input_ref": "construction_type",
+          "lookup_type": "EXACT"
+        }
+      ],
+      "rows": [
+        {
+          "matches": [
+            {
+              "value": "T01"
+            },
+            {
+              "value": "FRAME"
+            }
+          ],
+          "value": "1.00"
+        },
+        {
+          "matches": [
+            {
+              "value": "T01"
+            },
+            {
+              "value": "MASONRY"
+            }
+          ],
+          "value": "0.98"
+        },
+        {
+          "matches": [
+            {
+              "value": "T01"
+            },
+            {
+              "value": "SUPERIOR"
+            }
+          ],
+          "value": "0.95"
+        },
+        {
+          "matches": [
+            {
+              "value": "T17"
+            },
+            {
+              "value": "FRAME"
+            }
+          ],
+          "value": "1.08"
+        },
+        {
+          "matches": [
+            {
+              "value": "T17"
+            },
+            {
+              "value": "MASONRY"
+            }
+          ],
+          "value": "0.98"
+        },
+        {
+          "matches": [
+            {
+              "value": "T17"
+            },
+            {
+              "value": "SUPERIOR"
+            }
+          ],
+          "value": "0.95"
+        }
+      ],
+      "effective_period": null,
+      "provenance": null
+    }
+  ],
+  "rules": [],
+  "calculations": [
+    {
+      "id": "gross_risk_premium",
+      "name": "Gross Risk Premium Calculation",
+      "expression": {
+        "operator": "MULTIPLY",
+        "operands": [
+          {
+            "ref": "base_rate"
+          },
+          {
+            "ref": "territory_factor"
+          },
+          {
+            "ref": "roof_age_factor"
+          },
+          {
+            "ref": "deductible_factor"
+          },
+          {
+            "ref": "protection_class_factor"
+          },
+          {
+            "ref": "construction_factor"
+          },
+          {
+            "ref": "dwelling_limit_factor"
+          },
+          {
+            "ref": "territory_construction_adjustment"
+          }
+        ]
+      },
+      "depends_on": [
+        "base_rate",
+        "territory_factor",
+        "roof_age_factor",
+        "deductible_factor",
+        "protection_class_factor",
+        "construction_factor",
+        "dwelling_limit_factor",
+        "territory_construction_adjustment"
+      ],
+      "rounding_rule_ref": "standard_currency_rounding",
+      "rounding_rule": {
+        "id": "standard_currency_rounding",
+        "precision": 2,
+        "mode": "HALF_UP"
+      },
+      "effective_period": null,
+      "provenance": null,
+      "description": null
+    },
+    {
+      "id": "premium_after_discounts",
+      "name": "Premium After Discounts Calculation",
+      "expression": {
+        "ref": "gross_risk_premium"
+      },
+      "depends_on": [
+        "gross_risk_premium",
+        "multi_policy_discount",
+        "claims_free_discount"
+      ],
+      "rounding_rule_ref": "standard_currency_rounding",
+      "rounding_rule": {
+        "id": "standard_currency_rounding",
+        "precision": 2,
+        "mode": "HALF_UP"
+      },
+      "effective_period": null,
+      "provenance": null,
+      "description": null
+    },
+    {
+      "id": "premium_after_minimum",
+      "name": "Premium After Minimum Floor Calculation",
+      "expression": {
+        "ref": "premium_after_discounts"
+      },
+      "depends_on": [
+        "premium_after_discounts",
+        "policy_minimum"
+      ],
+      "rounding_rule_ref": "standard_currency_rounding",
+      "rounding_rule": {
+        "id": "standard_currency_rounding",
+        "precision": 2,
+        "mode": "HALF_UP"
+      },
+      "effective_period": null,
+      "provenance": null,
+      "description": null
+    },
+    {
+      "id": "total_policy_premium",
+      "name": "Total Final Policy Premium Calculation",
+      "expression": {
+        "ref": "premium_after_minimum"
+      },
+      "depends_on": [
+        "premium_after_minimum",
+        "policy_fee"
+      ],
+      "rounding_rule_ref": "standard_currency_rounding",
+      "rounding_rule": {
+        "id": "standard_currency_rounding",
+        "precision": 2,
+        "mode": "HALF_UP"
+      },
+      "effective_period": null,
+      "provenance": null,
+      "description": null
+    }
+  ],
+  "rounding_rules": [
+    {
+      "id": "standard_currency_rounding",
+      "precision": 2,
+      "mode": "HALF_UP"
+    }
+  ],
+  "modifiers": [
+    {
+      "id": "multi_policy_discount",
+      "name": "Multi-Policy Discount (8%)",
+      "modifier_type": "PERCENTAGE_DISCOUNT",
+      "applies_to": "gross_risk_premium",
+      "value": "0.08",
+      "eligibility": {
+        "left": {
+          "ref": "multi_policy"
+        },
+        "operator": "EQ",
+        "right": {
+          "value": true
+        }
+      },
+      "sequence": null,
+      "effective_period": null,
+      "provenance": null
+    },
+    {
+      "id": "claims_free_discount",
+      "name": "Claims-Free Discount (5%)",
+      "modifier_type": "PERCENTAGE_DISCOUNT",
+      "applies_to": "gross_risk_premium",
+      "value": "0.05",
+      "eligibility": {
+        "left": {
+          "ref": "claims_free"
+        },
+        "operator": "EQ",
+        "right": {
+          "value": true
+        }
+      },
+      "sequence": null,
+      "effective_period": {
+        "start": "2026-09-01",
+        "end": null
+      },
+      "provenance": null
+    }
+  ],
+  "constraints": [
+    {
+      "id": "policy_minimum",
+      "name": "Minimum Premium Floor ($575)",
+      "constraint_type": "MINIMUM",
+      "amount": "575.00",
+      "applies_to": "premium_after_discounts",
+      "sequence": 1,
+      "effective_period": null,
+      "provenance": null
+    }
+  ],
+  "fees": [
+    {
+      "id": "policy_fee",
+      "name": "Statutory Policy Fee ($40)",
+      "amount": "40.00",
+      "applies_to": "premium_after_minimum",
+      "sequence": 2,
+      "effective_period": null,
+      "provenance": null
+    }
+  ],
+  "coverages": [
+    {
+      "id": "COV_A",
+      "name": "Dwelling Coverage A",
+      "calculation_refs": [
+        "gross_risk_premium"
+      ],
+      "output_ref": null
+    },
+    {
+      "id": "COV_B",
+      "name": "Other Structures Coverage B",
+      "calculation_refs": [
+        "gross_risk_premium"
+      ],
+      "output_ref": null
+    },
+    {
+      "id": "COV_C",
+      "name": "Personal Property Coverage C",
+      "calculation_refs": [
+        "gross_risk_premium"
+      ],
+      "output_ref": null
+    },
+    {
+      "id": "COV_D",
+      "name": "Loss of Use Coverage D",
+      "calculation_refs": [
+        "gross_risk_premium"
+      ],
+      "output_ref": null
+    },
+    {
+      "id": "COV_E",
+      "name": "Personal Liability Coverage E",
+      "calculation_refs": [
+        "gross_risk_premium"
+      ],
+      "output_ref": null
+    },
+    {
+      "id": "COV_F",
+      "name": "Medical Payments Coverage F",
+      "calculation_refs": [
+        "gross_risk_premium"
+      ],
+      "output_ref": null
+    }
+  ],
+  "outputs": [
+    {
+      "id": "final_policy_premium",
+      "name": "Final Billed Premium",
+      "source_ref": "total_policy_premium",
+      "currency": "USD",
+      "description": null
+    },
+    {
+      "id": "gross_premium",
+      "name": "Gross Risk Premium Output",
+      "source_ref": "gross_risk_premium",
+      "currency": "USD",
+      "description": null
+    }
+  ],
+  "provenance": {
+    "sources": [
+      {
+        "source_type": "ACTUARIAL_SPEC",
+        "source_id": "synthetic-az-ho3-2026-09",
+        "source_name": "Arizona HO3 2026 Rate Filing Spec",
+        "source_version": null,
+        "location": null,
+        "page": null,
+        "section": null,
+        "artifact_reference": null
+      }
+    ],
+    "extraction_confidence": "1.0",
+    "interpretation_confidence": "1.0",
+    "notes": "Intentional three-defect source: $5,000 deductible factor 0.80 to 0.70, multi-policy discount 12% to 8%, and policy fee $25 to $40."
+  }
+}

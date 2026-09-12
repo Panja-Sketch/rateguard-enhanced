@@ -1,0 +1,85 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+/lib/
+/lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual Environments
+.venv/
+venv/
+ENV/
+env/
+
+# Pytest & Code Quality
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+
+# Node & Frontend
+node_modules/
+.next/
+out/
+dist/
+.npm
+*.tsbuildinfo
+
+# Environment & Secrets
+.env
+.env.*
+*.deploy-env.yaml
+infrastructure/.candidate-env.yaml
+!.env.example
+!**/.env.example
+
+# Google Cloud / API credentials
+credentials.json
+*credentials*.json
+application_default_credentials.json
+client_secret*.json
+*service-account*.json
+*service_account*.json
+
+# Private keys / certificates
+*.pem
+*.key
+*.p12
+*.pfx
+
+# IDEs & Editors
+.vscode/
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Reproducible local artifact-store output (LocalArtifactStore writes here
+# whenever GCS is unavailable or RATEGUARD_ARTIFACT_STORE is unset in local
+# dev/test runs) -- regenerated on demand, not meaningful source content.
+data/artifacts/
+

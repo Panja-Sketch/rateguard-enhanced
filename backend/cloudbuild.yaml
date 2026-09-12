@@ -1,0 +1,19 @@
+steps:
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'build'
+      - '-f'
+      - 'backend/Dockerfile'
+      - '-t'
+      - 'us-central1-docker.pkg.dev/${PROJECT_ID}/rateguard/rateguard-api:${_IMAGE_TAG}'
+      - '.'
+images:
+  - 'us-central1-docker.pkg.dev/${PROJECT_ID}/rateguard/rateguard-api:${_IMAGE_TAG}'
+substitutions:
+  # Default preserves the existing production build behavior exactly
+  # (deploy.ps1/deploy.sh never pass _IMAGE_TAG). A candidate/staging build
+  # passes an immutable tag derived from the git commit SHA instead — see
+  # infrastructure/deploy_candidate.sh — so a candidate build can never
+  # overwrite the production `:latest` image.
+  _IMAGE_TAG: 'latest'
+

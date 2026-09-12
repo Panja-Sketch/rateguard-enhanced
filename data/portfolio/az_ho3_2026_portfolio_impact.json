@@ -1,0 +1,83 @@
+{
+  "portfolio_id": "AZ_HO3_2026_SYNTHETIC_50K",
+  "total_policies": 50000,
+  "exposed_policy_count": 14607,
+  "exposed_policy_pct": 29.21,
+  "behaviorally_affected_count": 14607,
+  "behaviorally_affected_pct": 29.21,
+  "financially_affected_count": 13294,
+  "financially_affected_pct": 26.59,
+  "total_expected_premium": "13589617.67",
+  "total_target_premium": "13000875.25",
+  "total_signed_variance": "-588742.42",
+  "total_absolute_variance": "868974.18",
+  "undercharged_policy_count": 10247,
+  "total_undercharge_amount": "728858.30",
+  "overcharged_policy_count": 3047,
+  "total_overcharge_amount": "140115.88",
+  "average_variance_per_affected_policy": "65.37",
+  "max_single_policy_variance": "140.39",
+  "multi_defect_policy_count": 1246,
+  "defect_exposures": [
+    {
+      "issue_id": "pred_diff_roof_age_factor_21..30_factor",
+      "issue_name": "Risk attributes matching table lookup 'roof_age_factor' key [21..30]",
+      "exposed_count": 9858,
+      "behaviorally_affected_count": 9858,
+      "financially_affected_count": 9858,
+      "total_expected_premium": "10589140.66",
+      "total_target_premium": "9868714.35",
+      "signed_variance": "-720426.31",
+      "absolute_variance": "720426.31",
+      "exposed_policy_pct": 19.72,
+      "affected_policy_pct": 19.72
+    },
+    {
+      "issue_id": "pred_diff_claims_free_discount_effective_start",
+      "issue_name": "Temporal discrepancy window for 'claims_free_discount' between 2026-09-01 and 2026-09-15",
+      "exposed_count": 5995,
+      "behaviorally_affected_count": 5995,
+      "financially_affected_count": 4682,
+      "total_expected_premium": "4339474.60",
+      "total_target_premium": "4417573.82",
+      "signed_variance": "78099.22",
+      "absolute_variance": "202132.54",
+      "exposed_policy_pct": 11.99,
+      "affected_policy_pct": 9.36
+    }
+  ],
+  "issue_breakdown": [
+    {
+      "issue_id": "pred_diff_roof_age_factor_21..30_factor",
+      "issue_name": "Risk attributes matching table lookup 'roof_age_factor' key [21..30]",
+      "exposed_count": 9858,
+      "behaviorally_affected_count": 9858,
+      "financially_affected_count": 9858,
+      "total_expected_premium": "10589140.66",
+      "total_target_premium": "9868714.35",
+      "signed_variance": "-720426.31",
+      "absolute_variance": "720426.31",
+      "exposed_policy_pct": 19.72,
+      "affected_policy_pct": 19.72
+    },
+    {
+      "issue_id": "pred_diff_claims_free_discount_effective_start",
+      "issue_name": "Temporal discrepancy window for 'claims_free_discount' between 2026-09-01 and 2026-09-15",
+      "exposed_count": 5995,
+      "behaviorally_affected_count": 5995,
+      "financially_affected_count": 4682,
+      "total_expected_premium": "4339474.60",
+      "total_target_premium": "4417573.82",
+      "signed_variance": "78099.22",
+      "absolute_variance": "202132.54",
+      "exposed_policy_pct": 11.99,
+      "affected_policy_pct": 9.36
+    }
+  ],
+  "performance_telemetry": {
+    "elapsed_seconds": 10.755,
+    "policies_per_second": 4649.05,
+    "policies_repriced": 14607
+  },
+  "metadata": {}
+}

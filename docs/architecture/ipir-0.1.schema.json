@@ -1,0 +1,1548 @@
+{
+  "$defs": {
+    "CalculationNode": {
+      "description": "Execution step node representing an intermediate calculation or rate factor application.",
+      "properties": {
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "expression": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Expression"
+            },
+            {
+              "$ref": "#/$defs/NodeReference"
+            },
+            {
+              "$ref": "#/$defs/LiteralValue"
+            }
+          ],
+          "title": "Expression"
+        },
+        "depends_on": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Depends On",
+          "type": "array"
+        },
+        "rounding_rule_ref": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Rounding Rule Ref"
+        },
+        "effective_period": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EffectivePeriod"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "provenance": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Provenance"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "description": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Description"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "expression"
+      ],
+      "title": "CalculationNode",
+      "type": "object"
+    },
+    "ComparisonCondition": {
+      "description": "Relational comparison condition between references, literals, or expressions.",
+      "properties": {
+        "left": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NodeReference"
+            },
+            {
+              "$ref": "#/$defs/LiteralValue"
+            },
+            {
+              "$ref": "#/$defs/Expression"
+            }
+          ],
+          "title": "Left"
+        },
+        "operator": {
+          "$ref": "#/$defs/ComparisonOperator"
+        },
+        "right": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NodeReference"
+            },
+            {
+              "$ref": "#/$defs/LiteralValue"
+            },
+            {
+              "$ref": "#/$defs/Expression"
+            }
+          ],
+          "title": "Right"
+        }
+      },
+      "required": [
+        "left",
+        "operator",
+        "right"
+      ],
+      "title": "ComparisonCondition",
+      "type": "object"
+    },
+    "ComparisonOperator": {
+      "description": "Supported relational comparison operators.",
+      "enum": [
+        "EQ",
+        "NE",
+        "GT",
+        "GTE",
+        "LT",
+        "LTE"
+      ],
+      "title": "ComparisonOperator",
+      "type": "string"
+    },
+    "ConstraintType": {
+      "description": "Premium constraint categories.",
+      "enum": [
+        "MINIMUM",
+        "MAXIMUM"
+      ],
+      "title": "ConstraintType",
+      "type": "string"
+    },
+    "CoverageDefinition": {
+      "description": "Association of calculation nodes with coverage-level premiums.",
+      "properties": {
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "calculation_refs": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Calculation Refs",
+          "type": "array"
+        },
+        "output_ref": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Output Ref"
+        }
+      },
+      "required": [
+        "id",
+        "name"
+      ],
+      "title": "CoverageDefinition",
+      "type": "object"
+    },
+    "EffectivePeriod": {
+      "description": "Represents a date-range period for rate versioning and temporal evaluation.",
+      "properties": {
+        "start": {
+          "format": "date",
+          "title": "Start",
+          "type": "string"
+        },
+        "end": {
+          "anyOf": [
+            {
+              "format": "date",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "End"
+        }
+      },
+      "required": [
+        "start"
+      ],
+      "title": "EffectivePeriod",
+      "type": "object"
+    },
+    "ExactMatch": {
+      "description": "Exact value lookup key for a table dimension.",
+      "properties": {
+        "value": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "integer"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+              "type": "string"
+            },
+            {
+              "type": "boolean"
+            }
+          ],
+          "title": "Value"
+        }
+      },
+      "required": [
+        "value"
+      ],
+      "title": "ExactMatch",
+      "type": "object"
+    },
+    "Expression": {
+      "description": "Declarative AST node for mathematical calculations.",
+      "properties": {
+        "operator": {
+          "$ref": "#/$defs/ExpressionOperator"
+        },
+        "operands": {
+          "items": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/Expression"
+              },
+              {
+                "$ref": "#/$defs/NodeReference"
+              },
+              {
+                "$ref": "#/$defs/LiteralValue"
+              }
+            ]
+          },
+          "title": "Operands",
+          "type": "array"
+        }
+      },
+      "required": [
+        "operator",
+        "operands"
+      ],
+      "title": "Expression",
+      "type": "object"
+    },
+    "ExpressionOperator": {
+      "description": "Supported mathematical calculation operators.",
+      "enum": [
+        "ADD",
+        "SUBTRACT",
+        "MULTIPLY",
+        "DIVIDE",
+        "MIN",
+        "MAX",
+        "ROUND"
+      ],
+      "title": "ExpressionOperator",
+      "type": "string"
+    },
+    "InputDataType": {
+      "description": "Data types for risk and policy inputs.",
+      "enum": [
+        "INTEGER",
+        "DECIMAL",
+        "MONEY",
+        "STRING",
+        "BOOLEAN",
+        "CATEGORY",
+        "DATE"
+      ],
+      "title": "InputDataType",
+      "type": "string"
+    },
+    "InsuranceLine": {
+      "description": "Supported lines of business.",
+      "enum": [
+        "HOMEOWNERS",
+        "PERSONAL_AUTO",
+        "COMMERCIAL_AUTO",
+        "COMMERCIAL_PROPERTY",
+        "WORKERS_COMPENSATION",
+        "OTHER"
+      ],
+      "title": "InsuranceLine",
+      "type": "string"
+    },
+    "InsuranceProduct": {
+      "description": "Specification of an insurance product line and jurisdiction context.",
+      "properties": {
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "line": {
+          "$ref": "#/$defs/InsuranceLine"
+        },
+        "form": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Form"
+        },
+        "jurisdiction": {
+          "$ref": "#/$defs/Jurisdiction"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "line",
+        "jurisdiction"
+      ],
+      "title": "InsuranceProduct",
+      "type": "object"
+    },
+    "Jurisdiction": {
+      "description": "Geographic scope definition for insurance products and filings.",
+      "properties": {
+        "country": {
+          "default": "US",
+          "title": "Country",
+          "type": "string"
+        },
+        "state_or_province": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "State Or Province"
+        }
+      },
+      "title": "Jurisdiction",
+      "type": "object"
+    },
+    "LiteralValue": {
+      "description": "Typed literal value (Decimal, integer, string, or boolean) for expressions and conditions.",
+      "properties": {
+        "value": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+              "type": "string"
+            },
+            {
+              "type": "integer"
+            },
+            {
+              "type": "string"
+            },
+            {
+              "type": "boolean"
+            }
+          ],
+          "title": "Value"
+        }
+      },
+      "required": [
+        "value"
+      ],
+      "title": "LiteralValue",
+      "type": "object"
+    },
+    "LogicalCondition": {
+      "description": "Logical combination (AND/OR) of boolean conditions.",
+      "properties": {
+        "operator": {
+          "$ref": "#/$defs/LogicalOperator"
+        },
+        "conditions": {
+          "items": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ComparisonCondition"
+              },
+              {
+                "$ref": "#/$defs/LogicalCondition"
+              }
+            ]
+          },
+          "title": "Conditions",
+          "type": "array"
+        }
+      },
+      "required": [
+        "operator",
+        "conditions"
+      ],
+      "title": "LogicalCondition",
+      "type": "object"
+    },
+    "LogicalOperator": {
+      "description": "Supported boolean logic operators.",
+      "enum": [
+        "AND",
+        "OR"
+      ],
+      "title": "LogicalOperator",
+      "type": "string"
+    },
+    "ModifierType": {
+      "description": "Pricing modifier categories.",
+      "enum": [
+        "PERCENTAGE_DISCOUNT",
+        "PERCENTAGE_SURCHARGE",
+        "FLAT_DISCOUNT",
+        "FLAT_SURCHARGE"
+      ],
+      "title": "ModifierType",
+      "type": "string"
+    },
+    "NodeReference": {
+      "description": "Explicit reference to another IPIR node or variable by identifier.",
+      "properties": {
+        "ref": {
+          "title": "Ref",
+          "type": "string"
+        }
+      },
+      "required": [
+        "ref"
+      ],
+      "title": "NodeReference",
+      "type": "object"
+    },
+    "PremiumConstraint": {
+      "description": "Specification of minimum or maximum premium bounds.",
+      "properties": {
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "constraint_type": {
+          "$ref": "#/$defs/ConstraintType"
+        },
+        "amount": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+              "type": "string"
+            }
+          ],
+          "title": "Amount"
+        },
+        "applies_to": {
+          "title": "Applies To",
+          "type": "string"
+        },
+        "sequence": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Sequence"
+        },
+        "effective_period": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EffectivePeriod"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "provenance": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Provenance"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "constraint_type",
+        "amount",
+        "applies_to"
+      ],
+      "title": "PremiumConstraint",
+      "type": "object"
+    },
+    "PricingConstant": {
+      "description": "Named constant value used within rate calculation ASTs.",
+      "properties": {
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "value": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+              "type": "string"
+            }
+          ],
+          "title": "Value"
+        },
+        "description": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Description"
+        },
+        "effective_period": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EffectivePeriod"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "provenance": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Provenance"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "value"
+      ],
+      "title": "PricingConstant",
+      "type": "object"
+    },
+    "PricingFee": {
+      "description": "Specification of fixed policy or transaction fees.",
+      "properties": {
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "amount": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+              "type": "string"
+            }
+          ],
+          "title": "Amount"
+        },
+        "applies_to": {
+          "title": "Applies To",
+          "type": "string"
+        },
+        "sequence": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Sequence"
+        },
+        "effective_period": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EffectivePeriod"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "provenance": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Provenance"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "amount",
+        "applies_to"
+      ],
+      "title": "PricingFee",
+      "type": "object"
+    },
+    "PricingInput": {
+      "description": "Definition of a risk factor or policy input variable required for rating.",
+      "properties": {
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "data_type": {
+          "$ref": "#/$defs/InputDataType"
+        },
+        "required": {
+          "default": true,
+          "title": "Required",
+          "type": "boolean"
+        },
+        "description": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Description"
+        },
+        "unit": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Unit"
+        },
+        "allowed_values": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Allowed Values"
+        },
+        "minimum": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+              "type": "string"
+            },
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Minimum"
+        },
+        "maximum": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+              "type": "string"
+            },
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Maximum"
+        },
+        "provenance": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Provenance"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "data_type"
+      ],
+      "title": "PricingInput",
+      "type": "object"
+    },
+    "PricingModifier": {
+      "description": "Specification of discounts, surcharges, or credits applied to rating steps.",
+      "properties": {
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "modifier_type": {
+          "$ref": "#/$defs/ModifierType"
+        },
+        "applies_to": {
+          "title": "Applies To",
+          "type": "string"
+        },
+        "value": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+              "type": "string"
+            },
+            {
+              "$ref": "#/$defs/NodeReference"
+            }
+          ],
+          "title": "Value"
+        },
+        "eligibility": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ComparisonCondition"
+            },
+            {
+              "$ref": "#/$defs/LogicalCondition"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Eligibility"
+        },
+        "sequence": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Sequence"
+        },
+        "effective_period": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EffectivePeriod"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "provenance": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Provenance"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "modifier_type",
+        "applies_to",
+        "value"
+      ],
+      "title": "PricingModifier",
+      "type": "object"
+    },
+    "PricingOutput": {
+      "description": "Declaration of target output premium fields (e.g. total_policy_premium).",
+      "properties": {
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "source_ref": {
+          "title": "Source Ref",
+          "type": "string"
+        },
+        "currency": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": "USD",
+          "title": "Currency"
+        },
+        "description": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Description"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "source_ref"
+      ],
+      "title": "PricingOutput",
+      "type": "object"
+    },
+    "PricingRule": {
+      "description": "Declarative conditional pricing rule (IF condition THEN value ELSE value).",
+      "properties": {
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "condition": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ComparisonCondition"
+            },
+            {
+              "$ref": "#/$defs/LogicalCondition"
+            }
+          ],
+          "title": "Condition"
+        },
+        "when_true": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Expression"
+            },
+            {
+              "$ref": "#/$defs/NodeReference"
+            },
+            {
+              "$ref": "#/$defs/LiteralValue"
+            }
+          ],
+          "title": "When True"
+        },
+        "when_false": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Expression"
+            },
+            {
+              "$ref": "#/$defs/NodeReference"
+            },
+            {
+              "$ref": "#/$defs/LiteralValue"
+            }
+          ],
+          "title": "When False"
+        },
+        "effective_period": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EffectivePeriod"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "provenance": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Provenance"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "condition",
+        "when_true",
+        "when_false"
+      ],
+      "title": "PricingRule",
+      "type": "object"
+    },
+    "Provenance": {
+      "description": "Lineage and audit metadata for IPIR pricing nodes.",
+      "properties": {
+        "sources": {
+          "items": {
+            "$ref": "#/$defs/SourceReference"
+          },
+          "title": "Sources",
+          "type": "array"
+        },
+        "extraction_confidence": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Extraction Confidence"
+        },
+        "interpretation_confidence": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Interpretation Confidence"
+        },
+        "notes": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Notes"
+        }
+      },
+      "title": "Provenance",
+      "type": "object"
+    },
+    "ProvenanceSourceType": {
+      "description": "Categories of source materials for pricing logic lineage.",
+      "enum": [
+        "REGULATORY_FILING",
+        "ACTUARIAL_SPEC",
+        "ACTUARIAL_WORKBOOK",
+        "PRICING_PLATFORM",
+        "POLICY_ADMIN_SYSTEM",
+        "RATING_ENGINE",
+        "REST_API",
+        "LEGACY_SYSTEM",
+        "MANUAL_ENTRY",
+        "OTHER"
+      ],
+      "title": "ProvenanceSourceType",
+      "type": "string"
+    },
+    "RangeMatch": {
+      "description": "Numeric or date range bracket lookup key for a table dimension.",
+      "properties": {
+        "minimum": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+              "type": "string"
+            },
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Minimum"
+        },
+        "maximum": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+              "type": "string"
+            },
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Maximum"
+        },
+        "include_minimum": {
+          "default": true,
+          "title": "Include Minimum",
+          "type": "boolean"
+        },
+        "include_maximum": {
+          "default": true,
+          "title": "Include Maximum",
+          "type": "boolean"
+        }
+      },
+      "title": "RangeMatch",
+      "type": "object"
+    },
+    "RateTable": {
+      "description": "Canonical 1D or 2D lookup table definition.",
+      "properties": {
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "dimensions": {
+          "items": {
+            "$ref": "#/$defs/TableDimension"
+          },
+          "title": "Dimensions",
+          "type": "array"
+        },
+        "rows": {
+          "items": {
+            "$ref": "#/$defs/TableRow"
+          },
+          "title": "Rows",
+          "type": "array"
+        },
+        "effective_period": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EffectivePeriod"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "provenance": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Provenance"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "dimensions",
+        "rows"
+      ],
+      "title": "RateTable",
+      "type": "object"
+    },
+    "RoundingMode": {
+      "description": "Supported rounding algorithms.",
+      "enum": [
+        "HALF_UP",
+        "HALF_EVEN",
+        "FLOOR",
+        "CEILING"
+      ],
+      "title": "RoundingMode",
+      "type": "string"
+    },
+    "RoundingRule": {
+      "description": "Specification of rounding direction and decimal precision for calculation steps.",
+      "properties": {
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "precision": {
+          "title": "Precision",
+          "type": "integer"
+        },
+        "mode": {
+          "$ref": "#/$defs/RoundingMode"
+        }
+      },
+      "required": [
+        "id",
+        "precision",
+        "mode"
+      ],
+      "title": "RoundingRule",
+      "type": "object"
+    },
+    "SourceReference": {
+      "description": "Reference to an origin document, workbook, or system entry.",
+      "properties": {
+        "source_type": {
+          "$ref": "#/$defs/ProvenanceSourceType"
+        },
+        "source_id": {
+          "title": "Source Id",
+          "type": "string"
+        },
+        "source_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source Name"
+        },
+        "source_version": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source Version"
+        },
+        "location": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Location"
+        },
+        "page": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Page"
+        },
+        "section": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Section"
+        },
+        "artifact_reference": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Artifact Reference"
+        }
+      },
+      "required": [
+        "source_type",
+        "source_id"
+      ],
+      "title": "SourceReference",
+      "type": "object"
+    },
+    "TableDimension": {
+      "description": "Specification of a rate table dimension key.",
+      "properties": {
+        "input_ref": {
+          "title": "Input Ref",
+          "type": "string"
+        },
+        "lookup_type": {
+          "$ref": "#/$defs/TableLookupType"
+        }
+      },
+      "required": [
+        "input_ref",
+        "lookup_type"
+      ],
+      "title": "TableDimension",
+      "type": "object"
+    },
+    "TableLookupType": {
+      "description": "Rate table lookup strategy.",
+      "enum": [
+        "EXACT",
+        "RANGE"
+      ],
+      "title": "TableLookupType",
+      "type": "string"
+    },
+    "TableRow": {
+      "description": "Row in a rate table mapping dimension matches to a rate factor or amount.",
+      "properties": {
+        "matches": {
+          "items": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ExactMatch"
+              },
+              {
+                "$ref": "#/$defs/RangeMatch"
+              }
+            ]
+          },
+          "title": "Matches",
+          "type": "array"
+        },
+        "value": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+              "type": "string"
+            }
+          ],
+          "title": "Value"
+        }
+      },
+      "required": [
+        "matches",
+        "value"
+      ],
+      "title": "TableRow",
+      "type": "object"
+    },
+    "TransactionType": {
+      "description": "Supported policy transaction contexts.",
+      "enum": [
+        "NEW_BUSINESS",
+        "RENEWAL",
+        "POLICY_CHANGE"
+      ],
+      "title": "TransactionType",
+      "type": "string"
+    }
+  },
+  "description": "Root canonical package containing an end-to-end executable IPIR pricing definition.",
+  "properties": {
+    "ipir_version": {
+      "default": "0.1",
+      "title": "Ipir Version",
+      "type": "string"
+    },
+    "id": {
+      "title": "Id",
+      "type": "string"
+    },
+    "name": {
+      "title": "Name",
+      "type": "string"
+    },
+    "version": {
+      "default": "1.0.0",
+      "title": "Version",
+      "type": "string"
+    },
+    "product": {
+      "$ref": "#/$defs/InsuranceProduct"
+    },
+    "effective_period": {
+      "$ref": "#/$defs/EffectivePeriod"
+    },
+    "transaction_types": {
+      "items": {
+        "$ref": "#/$defs/TransactionType"
+      },
+      "title": "Transaction Types",
+      "type": "array"
+    },
+    "inputs": {
+      "items": {
+        "$ref": "#/$defs/PricingInput"
+      },
+      "title": "Inputs",
+      "type": "array"
+    },
+    "constants": {
+      "items": {
+        "$ref": "#/$defs/PricingConstant"
+      },
+      "title": "Constants",
+      "type": "array"
+    },
+    "tables": {
+      "items": {
+        "$ref": "#/$defs/RateTable"
+      },
+      "title": "Tables",
+      "type": "array"
+    },
+    "rules": {
+      "items": {
+        "$ref": "#/$defs/PricingRule"
+      },
+      "title": "Rules",
+      "type": "array"
+    },
+    "calculations": {
+      "items": {
+        "$ref": "#/$defs/CalculationNode"
+      },
+      "title": "Calculations",
+      "type": "array"
+    },
+    "rounding_rules": {
+      "items": {
+        "$ref": "#/$defs/RoundingRule"
+      },
+      "title": "Rounding Rules",
+      "type": "array"
+    },
+    "modifiers": {
+      "items": {
+        "$ref": "#/$defs/PricingModifier"
+      },
+      "title": "Modifiers",
+      "type": "array"
+    },
+    "constraints": {
+      "items": {
+        "$ref": "#/$defs/PremiumConstraint"
+      },
+      "title": "Constraints",
+      "type": "array"
+    },
+    "fees": {
+      "items": {
+        "$ref": "#/$defs/PricingFee"
+      },
+      "title": "Fees",
+      "type": "array"
+    },
+    "coverages": {
+      "items": {
+        "$ref": "#/$defs/CoverageDefinition"
+      },
+      "title": "Coverages",
+      "type": "array"
+    },
+    "outputs": {
+      "items": {
+        "$ref": "#/$defs/PricingOutput"
+      },
+      "title": "Outputs",
+      "type": "array"
+    },
+    "provenance": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Provenance"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    }
+  },
+  "required": [
+    "id",
+    "name",
+    "product",
+    "effective_period"
+  ],
+  "title": "IPIRPackage",
+  "type": "object"
+}

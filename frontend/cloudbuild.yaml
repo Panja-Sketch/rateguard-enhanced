@@ -1,0 +1,19 @@
+steps:
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'build'
+      - '--build-arg'
+      - 'NEXT_PUBLIC_RATEGUARD_API_URL=${_NEXT_PUBLIC_RATEGUARD_API_URL}'
+      - '-t'
+      - 'us-central1-docker.pkg.dev/${PROJECT_ID}/rateguard/rateguard-web:${_IMAGE_TAG}'
+      - '.'
+images:
+  - 'us-central1-docker.pkg.dev/${PROJECT_ID}/rateguard/rateguard-web:${_IMAGE_TAG}'
+substitutions:
+  _NEXT_PUBLIC_RATEGUARD_API_URL: 'http://localhost:8000'
+  # Default preserves the existing production build behavior exactly
+  # (deploy.ps1/deploy.sh never pass _IMAGE_TAG). A candidate/staging build
+  # passes an immutable tag derived from the git commit SHA instead, and
+  # bakes in the candidate-tagged API URL via _NEXT_PUBLIC_RATEGUARD_API_URL
+  # — see infrastructure/deploy_candidate.sh.
+  _IMAGE_TAG: 'latest'

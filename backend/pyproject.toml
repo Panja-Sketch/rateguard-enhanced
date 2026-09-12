@@ -1,0 +1,64 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rateguard-backend"
+version = "0.1.0"
+description = "RateGuard AI — Continuous Pricing Assurance for Insurance Backend"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.110.0",
+    "uvicorn[standard]>=0.28.0",
+    "pydantic>=2.6.0",
+    "pydantic-settings>=2.2.0",
+    "python-dotenv>=1.0.0",
+    "networkx>=3.2.1",
+    "pandas>=2.2.0",
+    "openpyxl>=3.1.2",
+    "python-multipart>=0.0.9",
+    "httpx>=0.27.0",
+    "google-genai>=0.1.1",
+    "google-adk>=0.1.0",
+    "google-cloud-firestore>=2.15.0",
+    "google-cloud-storage>=2.14.0",
+    "google-cloud-bigquery>=3.18.0",
+    "google-cloud-pubsub>=2.19.0",
+    "reportlab>=4.1.0",
+    # Pinned transitive dependency, not used directly by our code. Required by
+    # google-cloud-firestore and google-cloud-pubsub. google-api-core==2.35.0 has
+    # a confirmed regression that percent-encodes the literal Firestore database
+    # id "(default)" into "%28default%29", which Firestore's API then rejects
+    # with "400 Invalid database id %28default%29" on every request. 2.34.0 is
+    # confirmed working with google-genai==2.19.0 and google-cloud-firestore in
+    # this repo. Remove this pin only after verifying a released google-api-core
+    # version that has fixed the regression (upstream tracking: the "(default)"
+    # database id itself is valid — this is a client-library encoding bug, not
+    # an invalid value).
+    "google-api-core==2.34.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+    "ruff>=0.3.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_functions = ["test_*"]
+asyncio_mode = "auto"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = ["B008", "E501"]

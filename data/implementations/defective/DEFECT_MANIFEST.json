@@ -1,0 +1,33 @@
+{
+  "package_id": "AZ_HO3_2026_09_DEFECTIVE",
+  "base_canonical_id": "AZ_HO3_2026_09",
+  "defects": [
+    {
+      "id": "DEFECT_ROOF_AGE_FACTOR",
+      "node": "roof_age_factor",
+      "semantic_path": "tables.roof_age_factor[21..30]",
+      "expected": "1.35",
+      "implemented": "1.25",
+      "severity": "CRITICAL",
+      "description": "Roof age 21-30 rating factor reduced from 1.35 to 1.25"
+    },
+    {
+      "id": "DEFECT_CLAIMS_FREE_EFFECTIVE_DATE",
+      "node": "claims_free_discount",
+      "semantic_path": "modifiers.claims_free_discount.effective_period",
+      "expected": "2026-09-01",
+      "implemented": "2026-09-15",
+      "severity": "HIGH",
+      "description": "Claims-free discount effective start date delayed by 14 days"
+    },
+    {
+      "id": "DEFECT_PREMIUM_SEQUENCE_DRIFT",
+      "node": "policy_minimum / policy_fee",
+      "semantic_path": "constraints.policy_minimum.sequence",
+      "expected": "policy_minimum sequence=3, policy_fee sequence=4",
+      "implemented": "policy_fee sequence=3, policy_minimum sequence=4",
+      "severity": "CRITICAL",
+      "description": "Minimum policy premium constraint sequence swapped with policy fee"
+    }
+  ]
+}

@@ -83,3 +83,7 @@ Thumbs.db
 # dev/test runs) -- regenerated on demand, not meaningful source content.
 data/artifacts/
 
+
+backend/.env
+frontend/.env.local
+firebase-admin-key.json

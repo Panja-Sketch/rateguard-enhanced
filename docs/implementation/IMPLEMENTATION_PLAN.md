@@ -19,7 +19,15 @@ This plan does not restate or reinterpret the locked source of truth. Where an a
 
 ## Checkpoint sequence
 
-### Session 1 (this session) — Shared foundations only
+### Session 2 — CP7 Controlled Workbook v1 compiler — DONE
+
+Built `backend/app/ingestion/workbook_v1/` (ZIP/XML safety inspection, sheet/column contract, mini-DSL parsing, defensive raw-formula scan, IPIR v0.2 mapping reusing session 1's models/validators/lowering boundary unchanged, compilation receipt, `compile_workbook` entrypoint that never raises), `backend/scripts/generate_workbook_v1_samples.py`, `data/samples/workbook_v1/{canonical,defective,negative}/`, and `backend/tests/ingestion/workbook_v1/`. Also wired `.xlsx` into the real `PricingSourceIngestionService` ingestion boundary (`backend/app/services/ingestion_service.py`) so it is genuinely reachable end-to-end, not just a standalone module (D6) — review found the legacy fabricating Excel/PDF adapter path was already unreachable from that boundary before this session, so this wiring did not need to touch `agents/supervisor.py`. See `docs/implementation/STATUS.md` ("Session 2") for verified test counts and `docs/implementation/DECISIONS.md` (D5, D6) for implementation-shape decisions. Full D1 execution (removing PDF/PLATFORM_CONFIG/the Gemini `CHOOSE_EXTRACTION_STRATEGY` decision entirely) remains open — see D6's last paragraph. CP8–CP12 remain deferred as below.
+
+### Session 3 — CP8 REST rating-engine connector — DONE
+
+Built `backend/app/connectors/` (`errors.py` typed `ConnectorFailureCategory`/`ConnectorException` mirroring CP7's `WorkbookError` convention, `contract.py` versioned request/response models with trace node/operation allowlisting, `registry.py` config-driven fixed registry with fail-closed `select_connector`, `security.py` HTTPS/SSRF/DNS destination validation, `retry.py` pure backoff/jitter function, `budget.py` mission-level 60s budget tracker, `client.py` the real `httpx`-based HTTP client wiring all of section 8.2's controls together, `health.py` the golden-case health-test function), plus `backend/tests/connectors/` (58 tests). Calls the real `backend/rating_engine` service (session 1) over real HTTP semantics via `httpx.ASGITransport` in tests. Added four new additive `Settings` fields to `backend/app/core/config.py`. Did not modify `backend/rating_engine/*` or any CP7 file. See `docs/implementation/STATUS.md` ("Session 3") for exact test counts and locked-doc coverage, and `docs/implementation/DECISIONS.md` (D7) for implementation-shape judgment calls (registry config shape, jurisdiction reconciliation, DNS-rebinding residual limitation, idempotency scoping, auth-header design, response-size constant). No FastAPI route was added for `POST /connectors/{connector_id}/test`; no wiring into `app/agents/supervisor.py`/`app/api/*`/`app/missions/*` was added — both remain future integration-session work, confirmed by grep.
+
+### Session 1 — Shared foundations only
 
 Scope explicitly excludes: workbook upload, connector networking (outbound HTTP client/SSRF/registry), frontend pages, deployment execution, and any roadmap feature not listed below.
 
@@ -33,9 +41,7 @@ Scope explicitly excludes: workbook upload, connector networking (outbound HTTP 
 
 ### Deferred to later sessions (not started now)
 
-- **CP7** — Controlled Workbook v1 compiler (`backend/app/ingestion/workbook_v1/`), ZIP/active-content safety, sheet/formula/DAG validation, compilation receipts, control-case execution against uploaded workbooks.
-- **CP8** — Connector registry, REST target client, SSRF/timeout/retry controls, `backend/app/api/connectors.py`.
-- **CP9** — `MissionStage` enum (D4) wired into `agents/supervisor.py`/`mission_execution_service.py`; stage-recording/checkpoint abstraction introduced in this session's foundations (see CP2a below) but not yet consumed by the supervisor.
+- **CP9** — `MissionStage` enum (D4) wired into `agents/supervisor.py`/`mission_execution_service.py`; stage-recording/checkpoint abstraction introduced in this session's foundations (see CP2a below) but not yet consumed by the supervisor. Also: wiring the CP8 connector module into the mission pipeline (mission-facing `SOURCE_B_LOAD_OR_CONNECTOR_CHECK`/`TARGET_EXECUTION` stages), and adding an actual `backend/app/api/connectors.py` route (`GET /connectors`, `POST /connectors/{connector_id}/test`) — CP8 built the connector module itself (registry, contract, client, health-test function) and it is genuinely reachable/tested standalone, but nothing yet calls it from `app/agents/supervisor.py` or `app/api/*`.
 - **CP2a — Stage-recording abstraction (D4, foundation only).** `backend/app/models/stages.py`: the 20-stage `MissionStage` enum and a `StageOutcome` (`COMPLETED`/`FAILED`/`REVIEW_REQUIRED`/`NOT_APPLICABLE` + reason) model, plus a small recorder helper. Not wired into the supervisor this session — that is CP9. Building the enum now (rather than later) satisfies D4's "introduce the enum and abstraction now" instruction without requiring the broader supervisor rewrite in the same pass.
 - **CP10** — Frontend workbook upload, connector picker, cohort/consumer-impact UI.
 - **CP11** — Deployment of `rating_engine` to Cloud Run, IAM, infra scripts update.
@@ -43,7 +49,64 @@ Scope explicitly excludes: workbook upload, connector networking (outbound HTTP 
 
 ---
 
-## File inventory for this session (CP0–CP6, CP2a)
+## File inventory for session 2 (CP7)
+
+New:
+- `backend/app/ingestion/__init__.py`
+- `backend/app/ingestion/workbook_v1/__init__.py`
+- `backend/app/ingestion/workbook_v1/limits.py`
+- `backend/app/ingestion/workbook_v1/errors.py`
+- `backend/app/ingestion/workbook_v1/zip_safety.py`
+- `backend/app/ingestion/workbook_v1/sheets.py`
+- `backend/app/ingestion/workbook_v1/formulas.py`
+- `backend/app/ingestion/workbook_v1/mapping.py`
+- `backend/app/ingestion/workbook_v1/receipt.py`
+- `backend/app/ingestion/workbook_v1/sanitize.py`
+- `backend/app/ingestion/workbook_v1/compiler.py`
+- `backend/scripts/generate_workbook_v1_samples.py`
+- `data/samples/workbook_v1/canonical/AZ_HO3_GOLDEN_workbook.xlsx` (generated)
+- `data/samples/workbook_v1/defective/AZ_HO3_GOLDEN_workbook.xlsx` (generated)
+- `data/samples/workbook_v1/negative/*.xlsx` (21 fixtures, generated)
+- `backend/tests/ingestion/__init__.py`
+- `backend/tests/ingestion/workbook_v1/*` (new test files)
+
+Modified: `backend/app/services/ingestion_service.py` (D6 — routes `.xlsx` to the new compiler at the real ingestion boundary), `backend/tests/agents/test_extraction_orchestration.py` (narrowed/added tests reflecting that `.xlsx` is now accepted there — see DECISIONS.md D6).
+
+Explicitly not touched this session: `backend/app/adapters/*` (full D1 removal remains open — see DECISIONS.md D6), `backend/app/api/*` (no HTTP route added), `backend/app/agents/*` (supervisor/Gemini extraction-strategy code untouched, confirmed unreachable for `.xlsx`), `backend/app/engines/target/*`, `frontend/*`, `infrastructure/*`.
+
+---
+
+## File inventory for session 3 (CP8)
+
+New:
+- `backend/app/connectors/__init__.py`
+- `backend/app/connectors/errors.py`
+- `backend/app/connectors/contract.py`
+- `backend/app/connectors/redact.py`
+- `backend/app/connectors/retry.py`
+- `backend/app/connectors/budget.py`
+- `backend/app/connectors/security.py`
+- `backend/app/connectors/registry.py`
+- `backend/app/connectors/client.py`
+- `backend/app/connectors/health.py`
+- `backend/tests/connectors/__init__.py`
+- `backend/tests/connectors/conftest.py`
+- `backend/tests/connectors/test_registry.py`
+- `backend/tests/connectors/test_contract.py`
+- `backend/tests/connectors/test_security.py`
+- `backend/tests/connectors/test_retry.py`
+- `backend/tests/connectors/test_redaction.py`
+- `backend/tests/connectors/test_client_golden.py`
+- `backend/tests/connectors/test_client_negative.py`
+- `backend/tests/connectors/test_health.py`
+
+Modified: `backend/app/core/config.py` (four new additive `Settings` fields — `rating_engine_connector_base_url`, `rating_engine_connector_is_local_dev`, `rating_engine_connector_auth_header_name`, `rating_engine_connector_auth_token_env_var` — all with safe defaults, no existing field changed).
+
+Explicitly not touched this session: `backend/rating_engine/*` (no narrow reason arose to modify it — see DECISIONS.md D7's jurisdiction bullet), `backend/app/ingestion/*`/`backend/app/services/ingestion_service.py`/`backend/tests/agents/test_extraction_orchestration.py` (CP7's uncommitted work, confirmed untouched by `git status`), `backend/app/api/*` (no route added), `backend/app/agents/*` (no mission-pipeline wiring — confirmed by grep that nothing outside `backend/app/connectors/`/`backend/tests/connectors/` imports `app.connectors`), `frontend/*`, `infrastructure/*`.
+
+---
+
+## File inventory for session 1 (CP0–CP6, CP2a)
 
 New:
 - `backend/app/ipir/v0_2/__init__.py`

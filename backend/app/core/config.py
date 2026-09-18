@@ -34,6 +34,21 @@ class Settings(BaseSettings):
     pubsub_topic: str = "assurance-runs"
     pubsub_subscription: str = "assurance-worker"
 
+    # REST rating-engine connector (locked doc section 8) — admin/config-
+    # controlled registry entry for the one real demo connector
+    # (`backend/rating_engine`). Never a per-mission arbitrary URL; see
+    # app/connectors/registry.py. `rating_engine_connector_is_local_dev`
+    # gates both the HTTPS-outside-local-development rule and the narrow
+    # loopback SSRF exception (section 8.2) — never a blanket bypass.
+    rating_engine_connector_base_url: str = "http://127.0.0.1:8000"
+    rating_engine_connector_is_local_dev: bool = True
+    # Optional bearer-style auth wiring for a *future* authenticated target;
+    # the real demo target enforces no auth today (see D3). Never a
+    # hardcoded secret value — only an env-var *name* to read the token
+    # from at request time (never logged).
+    rating_engine_connector_auth_header_name: str | None = None
+    rating_engine_connector_auth_token_env_var: str | None = None
+
     model_config = SettingsConfigDict(
         env_prefix="RATEGUARD_",
         env_file=".env",

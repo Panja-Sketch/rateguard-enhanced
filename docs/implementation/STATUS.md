@@ -55,7 +55,133 @@ Command: `cd backend && python -m pytest -q`
 
 ## Known current-state facts (carried forward, still accurate)
 
-- Excel and PDF source adapters still fabricate results (ignore uploaded content) — untouched this session. D1's removal is tracked for CP7, not this session (see DECISIONS.md D1).
-- No REST rating-engine *connector* (client/SSRF/registry) exists yet — only the target-side service (`backend/rating_engine`) built this session. Nothing in `backend/app` calls it yet.
+- Excel and PDF source adapters still fabricate results (ignore uploaded content) — untouched this session. D1's removal remains open (see DECISIONS.md D5's last bullet); it was judged out of scope for CP7 specifically because the session-2 task list scoped work entirely to `backend/app/ingestion/workbook_v1/` and did not ask for supervisor/adapter/API changes.
+- No REST rating-engine *connector* (client/SSRF/registry) exists yet — only the target-side service (`backend/rating_engine`) built in session 1. Nothing in `backend/app` calls it yet.
 - `MissionStage` enum exists (`backend/app/models/stages.py`) but `agents/supervisor.py` does not yet use it — the 8-internal-stage model is still what actually runs missions today.
 - IPIR v0.1 (`backend/app/ipir/*.py`, excluding `v0_2/`) is unchanged in behavior; only additive schema hardening (`extra=forbid`, optional `TableRow.priority`/`RateTable.requires_total_coverage`/`RateTable.default_value` fields) was added. Existing v0.1 JSON documents without these fields parse identically to before.
+- The new `backend/app/ingestion/workbook_v1/` compiler is standalone: nothing in `backend/app/api/*`, `backend/app/agents/*`, or the mission pipeline calls it yet. Wiring a real upload/compile API endpoint to it is not part of this session's scope and remains open for CP8/CP9-adjacent work.
+
+## Session 2 — Controlled Workbook v1 compiler (CP7)
+
+**Scope:** Built `backend/app/ingestion/workbook_v1/`, the Controlled RateGuard Workbook v1 compiler (locked doc section 5), entirely on top of session 1's IPIR v0.2 models/validators/lowering boundary — no session-1 file was modified.
+
+### Files added
+
+- `backend/app/ingestion/__init__.py`, `backend/app/ingestion/workbook_v1/{__init__,limits,errors,zip_safety,sheets,formulas,mapping,receipt,sanitize,compiler}.py`
+- `backend/scripts/generate_workbook_v1_samples.py`
+- `data/samples/workbook_v1/canonical/AZ_HO3_GOLDEN_workbook.xlsx`, `data/samples/workbook_v1/defective/AZ_HO3_GOLDEN_workbook.xlsx`, `data/samples/workbook_v1/negative/*.xlsx` (21 fixtures) — all generated, none hand-edited
+- `backend/tests/ingestion/__init__.py`, `backend/tests/ingestion/workbook_v1/{__init__,conftest,test_compiler,test_sanitize}.py`
+
+### What was verified by running code
+
+- **Canonical workbook** (`data/samples/workbook_v1/canonical/AZ_HO3_GOLDEN_workbook.xlsx`) compiles to `status="VERIFIED"`, embedded control case `golden_case` passes with `actual="700.00"` exactly. Verified by `test_canonical_workbook_compiles_and_produces_700`.
+- **Defective workbook** compiles to `status="VERIFIED"` with its own control case proving `actual="655.00"` (see the A2-scoping note below and in DECISIONS.md D5 for exactly what this test does and does not claim). Verified by `test_defective_workbook_compiles_and_control_case_proves_655`.
+- **21 distinct negative fixtures**, each produced programmatically by `generate_workbook_v1_samples.py` (ZIP/entry manipulation of a real base workbook, or plain openpyxl cell writes — never hand-edited binaries), each independently confirmed via `compile_workbook` to raise the intended, distinct error code. Full list and locked-doc mapping below.
+- **Sanitizer** (`sanitize.py`) unit-tested directly (8 tests) and end-to-end through the compiler boundary (1 test): an injected `RG_METADATA` value containing both a formula-injection payload (`=cmd|'/c calc'!A1`) and HTML markup pattern comes out with no leading raw `=` and with markup-significant characters HTML-escaped.
+- **Grep self-audit**: no `eval(`, `exec(`, `subprocess`, `os.system`, `pickle.load`, or `yaml.load` anywhere in `backend/app/ingestion/workbook_v1/` (confirmed by direct grep, not by inspection alone).
+- **Full existing suite regression**: `cd backend && python -m pytest -q` — before this session's changes: 489 passed (session 1's final count, itself 398 pre-existing + 91 from session 1). After this session's changes: see the run recorded immediately below; CP7 is purely additive (no existing file was modified), so no regression was expected or found.
+
+### Locked doc section 17.1 / acceptance-scenario coverage
+
+| Locked item | Test function |
+|---|---|
+| Valid canonical workbook compiles, $700.00 | `test_canonical_workbook_compiles_and_produces_700` |
+| Valid defective workbook compiles/control case proves $655.00 | `test_defective_workbook_compiles_and_control_case_proves_655` (narrowed scope — see DECISIONS.md D5) |
+| Unknown function rejects (A8) | `test_unknown_function_rejects_matching_a8` |
+| Macro-enabled workbook rejects | `test_macro_enabled_workbook_rejects`, `test_macro_enabled_via_xlsm_extension_rejects` |
+| External link rejects | `test_external_link_rejects` |
+| Hidden dependency outside contract rejects | `test_hidden_dependency_outside_contract_rejects` |
+| Duplicate IDs reject | `test_duplicate_ids_reject` |
+| Missing control case causes REVIEW_REQUIRED | `test_missing_control_case_causes_review_required` |
+| Overlapping ambiguous ranges reject | `test_overlapping_ambiguous_ranges_reject` |
+| Formula cycle rejects | `test_formula_cycle_rejects` |
+| Tampered workbook changes source hash / invalidates prior attestation | `test_tampered_workbook_changes_source_hash_and_invalidates_attestation` |
+
+Additional session-instructed negative coverage beyond the locked bullet list, all passing: OLE/embedded object (`test_ole_embedded_object_rejects`), password-protected/encrypted (`test_password_protected_encrypted_workbook_rejects`), oversized file (`test_oversized_file_rejects`), ZIP bomb/compression ratio (`test_zip_bomb_compression_ratio_rejects`), excessive ZIP entries (`test_excessive_zip_entry_count_rejects`), path traversal (`test_path_traversal_entry_name_rejects`), non-.xlsx extension/signature (`test_non_xlsx_extension_rejects`, `test_bad_file_signature_rejects`), missing required sheet/column (`test_missing_required_sheet_rejects`, `test_missing_required_column_rejects`), division-by-zero path (`test_division_by_zero_path_rejects`), missing rounding on an output (`test_missing_rounding_on_output_rejects`), currency inconsistency (`test_currency_inconsistency_across_outputs_rejects`), empty file (`test_empty_file_rejects`), and a "never raises" contract test (`test_never_raises_always_returns_a_receipt`).
+
+### Test results (session 2)
+
+- New tests added in `backend/tests/ingestion/workbook_v1/`: 35, all passing (27 in `test_compiler.py`, 8 in `test_sanitize.py`).
+- Full-suite run before session 2's changes: 489 passed, 0 failed (session 1's final count).
+- Full-suite run after CP7's core module (before the D6 ingestion-boundary wiring): 524 passed, 0 failed, 761.81s — confirmed independently twice (once by the implementing agent, once by an independent re-run), exactly matching 489 + 35.
+- Full-suite run after D6's ingestion-boundary wiring (`ingestion_service.py` changes, 2 net-new tests replacing/added in `tests/agents/test_extraction_orchestration.py`): **526 passed, 0 failed**, 741.39s. Command: `cd backend && python -m pytest -q`.
+
+### Ingestion-boundary wiring (D6, after CP7's core module was built)
+
+Review of the D1 concern found the real user-reachable upload path, `PricingSourceIngestionService.register_source`, already rejected `.xlsx`/`.xls`/`.pdf` before any `SourceFormat.EXCEL` `SourceDescriptor` could exist — so the fabricating `ExcelPricingAdapter`/Gemini-extraction-strategy path was already unreachable from the real API, only exercised by direct internal unit tests. Given the user's explicit choice ("minimal fail-closed fix now" over full D1 execution — see DECISIONS.md D6), `.xlsx` is now routed at that same boundary to the real compiler instead of being hard-rejected:
+
+- `register_source` accepts `.xlsx` (still not legacy `.xls`) as `SourceFormat.EXCEL`.
+- `compile_source` calls a new `_compile_controlled_workbook` helper (`app/services/ingestion_service.py`) for `SourceFormat.EXCEL` sources — calls `compile_workbook` directly, lowers a non-`REJECTED` result to v0.1 via `lower_to_v0_1`, and raises `SourceParsingError` on `REJECTED`. `agents/supervisor.py` and the legacy Excel adapter/Gemini extraction-strategy code were **not modified** and are confirmed-by-test unreachable for `.xlsx` specifically; PDF still uses that unchanged path (out of scope, per locked doc section 4.2).
+- Verified by `tests/agents/test_extraction_orchestration.py::test_ingestion_service_rejects_legacy_xls_and_pdf_uploads` (narrowed from the prior test, whose `.xlsx`-must-reject assertion is now the opposite of intended behavior), `test_ingestion_service_rejects_unsafe_xlsx_workbook`, and `test_ingestion_service_compiles_canonical_workbook_v1_sample_end_to_end` (real `register_source` → `compile_source` round trip on the generated canonical sample reaches `VERIFIED`/confidence `1.0`).
+
+### Known limitations / judgment calls a reviewer should sanity-check
+
+- **Full D1 not executed.** PDF and `.xls` ingestion still resolve through the legacy `agents/supervisor.py` Gemini-extraction-strategy path (`.xls`/`.pdf` are hard-rejected before reaching it, PDF is not); `PLATFORM_CONFIG` ingestion and the `CHOOSE_EXTRACTION_STRATEGY` Gemini decision remain in the codebase for that format. Removing them fully is unresolved follow-up work — see DECISIONS.md D6.
+- **Gemini assisted-mapping (locked doc section 5.4) is not implemented, by design** — explicitly out of scope for this pass. No stub, no fake confidence score, no autonomous retry loop was built in its place.
+- **Encrypted-workbook fixture is a signature-only OLE/CFB stub**, not a fully-formed encrypted OOXML container (openpyxl cannot produce one). See DECISIONS.md D5 for why this still exercises the real code path rather than simulating it.
+- **Compression-ratio/entry-count constants** (`MAX_ZIP_ENTRIES=2000`, `MAX_TOTAL_UNCOMPRESSED_BYTES=200 MiB`, `MAX_ENTRY_COMPRESSION_RATIO=100x`) are conservative, documented judgment calls, not derived from a benchmark corpus of real actuarial workbooks (none exists yet for this contract).
+- **A2-scoping decision**: the "defective workbook" test is scoped strictly to what a workbook *compiler* can honestly claim (internal self-consistency against its own embedded control case) and explicitly does not perform any canonical-vs-defective cross-engine comparison, which belongs to the mission-level reconciliation engine, not this module.
+- **The RG_CALCULATIONS mini-DSL's IF condition grammar is deliberately narrow** (one comparison, or exactly two joined by a single AND/OR) — matching the locked doc's "limited IF" language, not a general boolean-expression parser.
+- **Upload endpoint / GCS quarantine storage / mission-pipeline wiring beyond `PricingSourceIngestionService`** (e.g. an actual `POST /sources/uploads` HTTP route, mission `SOURCE_A_LOAD`/`SOURCE_B_LOAD` stage consumption) is unchanged and out of scope for this session — `compile_workbook` and now `PricingSourceIngestionService` are real and tested, but the broader mission pipeline does not yet drive them.
+
+## Session 3 — REST rating-engine connector (CP8)
+
+**Scope:** Built `backend/app/connectors/`, the client side of the locked doc section 8 REST target-engine connector (registry, versioned request/response contract, real HTTP client with SSRF/timeout/retry controls, golden-case health-test function), calling the real `backend/rating_engine` demo service (session 1) over real HTTP semantics via `httpx`. `backend/rating_engine/*` was not modified. CP7's uncommitted files (`backend/app/ingestion/*`, `backend/app/services/ingestion_service.py`, `backend/tests/agents/test_extraction_orchestration.py`, `backend/scripts/generate_workbook_v1_samples.py`, `backend/tests/ingestion/*`, `data/samples/*`) were not touched — confirmed by `git status` showing the identical modification set before and after this session's changes.
+
+### Files added
+
+- `backend/app/connectors/{__init__,errors,contract,redact,retry,budget,security,registry,client,health}.py`
+- `backend/tests/connectors/{__init__,conftest,test_registry,test_contract,test_security,test_retry,test_redaction,test_client_golden,test_client_negative,test_health}.py`
+
+### Files modified
+
+- `backend/app/core/config.py` — added four new `Settings` fields (`rating_engine_connector_base_url`, `rating_engine_connector_is_local_dev`, `rating_engine_connector_auth_header_name`, `rating_engine_connector_auth_token_env_var`), additive only, all with safe defaults (`is_local_dev=True`, base URL pointing at the local demo service, no auth configured by default). No existing field changed.
+
+### What was verified by running code
+
+- **Baseline before this session's changes:** `cd backend && python -m pytest -q` → **526 passed, 0 failed**, 892.82s (matches session 2's final count exactly — no drift).
+- **New `backend/tests/connectors/` suite run in isolation:** **58 passed, 0 failed**, 0.15s (all real assertions; the `test_pydantic_dict_str_str_actually_rejects_a_float_in_this_config` test's expectation was corrected after actually running it once and observing the real behavior of the pinned Pydantic version, per the task's explicit "verify actual behavior with a real test rather than assuming" instruction — see D7). No `xfail`, no `skip`, confirmed by grep.
+- **Full suite after this session's changes:** see the run recorded immediately below.
+- **Registry fail-closed behavior:** `test_select_connector_fails_closed_for_unregistered_connector`, `test_select_connector_fails_closed_for_undeclared_engine_version`, `test_select_connector_never_falls_back_to_a_default` — an unregistered `connector_id` or undeclared `engine_version` always raises a typed exception carrying `ConnectorFailureCategory.NON_RETRYABLE`, never silently resolves to the one real demo entry.
+- **Golden values reproduced through the full client path** (registry selection → HTTPS/SSRF checks → real HTTP request over `httpx.ASGITransport` wrapping the real `rating_engine.main.app` → schema validation): `canonical-v1` → `$700.00`, `defective-v1` → `$655.00` (`test_client_golden.py`).
+- **SSRF/destination-safety checks exercise real `ipaddress`/`socket.getaddrinfo` logic**, not mocks: private RFC1918 addresses, loopback without the local-dev flag, the AWS/GCP-style `169.254.169.254`/`fd00:ec2::254` metadata addresses, and a public IP literal are each asserted against the real stdlib classification (`test_security.py`). No test performs a real DNS query — every host used is either an IP literal (no resolver invoked) or `localhost`/a loopback address resolved via the OS-local mechanism.
+- **Log redaction proven with a real captured log record**, not just the `scrub_secrets` unit function in isolation: `test_secret_never_appears_unredacted_in_captured_log_output` drives a real client failure path (an injected transport raising a connection error whose message embeds a bearer-token-shaped secret) through `caplog` and asserts the secret string is absent from every captured record.
+- **Backoff/jitter is a pure function**, unit-tested for bounds (zero at `random_fn()==0`, exact ceiling at `random_fn()==1`, capped growth, monotonic increase across attempts 1–5) with no real sleeping anywhere in `test_retry.py`.
+- **Retry/backoff integration**: a fake target failing with 429 twice then succeeding is retried transparently (`test_429_retries_then_succeeds_with_backoff_mocked`); a fake target failing with 503 forever is retried exactly to the locked doc section 16.2 cap of five attempts and then raises `CONNECTOR_UPSTREAM_ERROR`/`RETRYABLE` (`test_5xx_retries_capped_at_five_attempts`); a fake target returning 400 is never retried at all (`test_4xx_application_rejection_is_never_retried`) — all with an injected no-op sleep so the suite stays fast (0.15s total).
+- **Grep self-audit**: `grep -rln "app.connectors" app/ tests/` outside `app/connectors/`/`tests/connectors/` found only a documentation comment in `app/core/config.py` (pointing a reader at the registry module) — no actual import. Nothing in `app/agents/supervisor.py`, `app/api/*`, or `app/missions/*` calls the new connector module.
+
+### Locked doc section 17.1 / 16.2 / 8.2 coverage table
+
+| Locked item | Test function |
+|---|---|
+| Canonical result ($700.00) | `test_client_golden.py::test_canonical_result_is_700` |
+| Defective result ($655.00) | `test_client_golden.py::test_defective_result_is_655` |
+| Authentication denied | `test_client_negative.py::test_authentication_denied` (and the positive counterpart `test_authentication_succeeds_with_correct_token`) |
+| Timeout | `test_client_negative.py::test_timeout_triggers_and_is_classified_retryable` (deterministic transport-level timeout injection — see D7/inline docstring for why `httpx.ASGITransport` does not itself enforce `httpx.Timeout`) |
+| 429 and 5xx retry, capped at five | `test_client_negative.py::test_429_retries_then_succeeds_with_backoff_mocked`, `test_5xx_retries_capped_at_five_attempts` |
+| 4xx never retried | `test_client_negative.py::test_4xx_application_rejection_is_never_retried` |
+| Malformed JSON | `test_client_negative.py::test_malformed_json_rejected` |
+| Wrong request ID | `test_client_negative.py::test_wrong_request_id_rejected` |
+| Wrong engine_version (additional) | `test_client_negative.py::test_wrong_engine_version_rejected` |
+| Partial batch (incomplete outputs) | `test_client_negative.py::test_partial_batch_incomplete_outputs_rejected` |
+| Oversized response | `test_client_negative.py::test_oversized_response_rejected` |
+| Redirect denied | `test_client_negative.py::test_redirect_rejected_not_followed` |
+| SSRF: private/loopback/link-local/metadata address rejected | `test_security.py::test_private_rfc1918_address_rejected`, `test_cloud_metadata_address_rejected`, `test_ipv6_metadata_style_link_local_rejected`, `test_loopback_ip_literal_rejected_without_local_dev_flag`, plus the integration-level `test_client_rejects_private_destination_before_connecting` |
+| Duplicate request returns stable response | `test_client_golden.py::test_duplicate_request_id_returns_stable_response` (see D7 for the honest "stable" scoping) |
+| Float-typed output rejected (task-specific) | `test_client_negative.py::test_float_output_rejected_explicitly_not_relying_on_pydantic_coercion` + `test_pydantic_dict_str_str_actually_rejects_a_float_in_this_config` |
+| Unsupported trace node rejected (task-specific) | `test_client_negative.py::test_unsupported_trace_node_rejected`, `test_contract.py::test_trace_step_rejects_unsupported_node_type`/`test_trace_step_rejects_unsupported_operation` |
+| Log redaction | `test_redaction.py::test_secret_never_appears_unredacted_in_captured_log_output` |
+| Backoff/jitter pure-function bounds | `test_retry.py` (6 cases) |
+| §8.2 HTTPS-outside-local-dev enforcement | `test_security.py::test_http_rejected_outside_local_dev`, `test_http_rejected_even_in_local_dev_for_non_loopback_host`, `test_http_allowed_for_loopback_in_local_dev` |
+| §13.2 safe metadata only, no credentials | `test_registry.py::test_metadata_never_exposes_base_url_or_credentials` |
+| §13.2 golden-case health test | `test_health.py::test_health_check_passes_for_real_canonical_engine`, `test_health_check_fails_closed_for_unregistered_connector` |
+| extra="forbid" contract enforcement | `test_contract.py::test_request_forbids_unknown_fields`, `test_response_forbids_unknown_fields` |
+
+### Known limitations / judgment calls a reviewer should sanity-check
+
+- **DNS-rebinding is mitigated, not eliminated** — see D7 for the honest, specific residual-limitation statement (the transport connects by hostname, not by the pre-validated IP object).
+- **The real-timing timeout path** (a target genuinely slower than the 3s/10s locked timeouts, observed end-to-end over a real socket) was verified manually during development against a real bound TCP server, but is not re-asserted as an automated test — `httpx.ASGITransport` was found (by actually running the test, not by assumption) not to enforce `httpx.Timeout` for a purely in-process ASGI call, so the automated suite instead deterministically tests the connector's own catch-and-classify logic for a real `httpx.TimeoutException` via a transport that raises one directly. Documented rather than silently worked around.
+- **No live FastAPI route added** for `POST /connectors/{connector_id}/test` — `app/connectors/health.py` provides the function; wiring an authenticated admin route under `app/api/*` is left to the future integration session, per the task's own explicit scoping.
+- **Auth-header mechanism is untested against the real demo target** because that target enforces no authentication today (by design, per D3) — it is proven end-to-end only against a purpose-built fake target in `tests/connectors/conftest.py::make_auth_required_app`.
+- **Idempotency claim is intentionally weak and documented as such** ("same inputs + same request_id → same outputs" for a stateless deterministic target), not a request-id-keyed response cache — see D7.
+- **Response-size cap (1 MiB) and the two locked exact timeout numbers (3s/10s) are the only "chosen constant" judgment calls in this module** — the size cap is a documented, conservative pick (see D7); the timeouts are copied verbatim from the locked doc, not chosen.

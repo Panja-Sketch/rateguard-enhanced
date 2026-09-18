@@ -1,3 +1,5 @@
+from app.connectors.errors import ConnectorException
+from app.connectors.registry import select_connector
 from app.models.mission import (
     AssuranceMission,
     ComparisonMode,
@@ -75,6 +77,33 @@ class MissionValidationService:
                         message="Source B must be explicitly selected for Equivalence comparison mode.",
                     )
                 )
+
+        # Connector-backed Source B: fail closed at mission-create time,
+        # never at execution time. A mission may never carry an arbitrary
+        # URL — only a connector_id/engine_version pair that is actually
+        # registered (app.connectors.registry.select_connector).
+        if mission.source_b is not None and mission.source_b.source_type == "API_CONNECTOR":
+            connector_id = mission.source_b.connector_id
+            engine_version = mission.source_b.engine_version
+            if not connector_id or not engine_version:
+                issues.append(
+                    ValidationIssue(
+                        field="source_b",
+                        code="CONNECTOR_SELECTION_REQUIRED",
+                        message="A connector-backed Source B requires both connector_id and engine_version.",
+                    )
+                )
+            else:
+                try:
+                    select_connector(connector_id, engine_version)
+                except ConnectorException as exc:
+                    issues.append(
+                        ValidationIssue(
+                            field="source_b",
+                            code=exc.error.code,
+                            message=exc.error.message,
+                        )
+                    )
 
         return issues
 

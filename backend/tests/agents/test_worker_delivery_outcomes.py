@@ -139,7 +139,7 @@ def test_cancelled_mission_acks() -> None:
     fake_result = MagicMock()
     fake_result.release_decision.data.status = "CANCELLED"
 
-    def _fake_run_mission(mission, left_pkg, right_pkg, cancellation_check=None):
+    def _fake_run_mission(mission, left_pkg, right_pkg, target_connector=None, cancellation_check=None):
         mission.status = MissionStatus.CANCELLED
         return fake_result
 
@@ -168,7 +168,7 @@ def test_no_duplicate_execution_under_redelivery() -> None:
     fake_result = MagicMock()
     fake_result.release_decision.data.status = "PASS"
 
-    def _fake_run_mission(mission, left_pkg, right_pkg, cancellation_check=None):
+    def _fake_run_mission(mission, left_pkg, right_pkg, target_connector=None, cancellation_check=None):
         mission.status = MissionStatus.COMPLETED
         store.update_run_status(run_id=mission_id, status=AssuranceRunStatus.COMPLETED, workflow_stage="COMPLETED")
         return fake_result
@@ -189,6 +189,67 @@ def test_no_duplicate_execution_under_redelivery() -> None:
     assert first.should_ack is True
     assert second.outcome == ProcessingOutcome.DUPLICATE_ALREADY_PROCESSED
     assert second.should_ack is True
+
+
+def test_no_duplicate_execution_under_redelivery_for_connector_backed_mission() -> None:
+    """Same guarantee as `test_no_duplicate_execution_under_redelivery`, but
+    for a mission whose Source B is a live REST connector (`API_CONNECTOR`)
+    rather than a bundled sample package — the lease/idempotency machinery
+    in `MissionExecutionService.execute_job` must not care which kind of
+    Source B a mission has; a connector call happening inside the held lease
+    must never produce a second logical execution or a second final
+    decision under redelivery."""
+    mission_id = "MIS-REDELIVER-CONNECTOR"
+    store = InMemoryRunStore()
+    connector_mission = AssuranceMission(
+        mission_id=mission_id,
+        name="Connector-Backed Mission",
+        mode=ComparisonMode.RELEASE_CONFORMANCE,
+        status=MissionStatus.QUEUED,
+        objective=MissionObjective(product="az_ho3", jurisdiction="Arizona", effective_period_start="2026-10-01"),
+        source_a=PricingSourceRef(source_id="AZ_HO3_2026_09", source_type="SAMPLE_RELEASE", name="Source A"),
+        source_b=PricingSourceRef(
+            source_id="rating-engine-demo", source_type="API_CONNECTOR", name="Connector",
+            connector_id="rating-engine-demo", engine_version="canonical-v1",
+        ),
+    )
+    store.save_run(
+        AssuranceRunRecord(
+            run_id=mission_id,
+            status=AssuranceRunStatus.QUEUED,
+            workflow_stage="QUEUED",
+            metadata={"mission_object": connector_mission.model_dump(mode="json")},
+        )
+    )
+    job = AssuranceJob(job_id="JOB-REDELIVER-CONNECTOR", run_id=mission_id, job_type="ASSURANCE_MISSION_V2")
+
+    fake_result = MagicMock()
+    fake_result.release_decision.data.status = "PASS"
+    connector_call_count = {"n": 0}
+
+    def _fake_run_mission(mission, left_pkg, right_pkg, target_connector=None, cancellation_check=None):
+        assert target_connector is not None
+        assert target_connector.connector_id == "rating-engine-demo"
+        connector_call_count["n"] += 1
+        mission.status = MissionStatus.COMPLETED
+        store.update_run_status(run_id=mission_id, status=AssuranceRunStatus.COMPLETED, workflow_stage="COMPLETED")
+        return fake_result
+
+    with (
+        patch("app.services.mission_execution_service.get_run_store", return_value=store),
+        patch("app.services.mission_execution_service.AssuranceSupervisor") as mock_supervisor_cls,
+        patch("app.services.mission_execution_service.resolve_demo_package", return_value=MagicMock()),
+    ):
+        mock_supervisor_cls.return_value.run_mission.side_effect = _fake_run_mission
+
+        first = MissionExecutionService.execute_job(job)
+        second = MissionExecutionService.execute_job(job)
+
+        assert mock_supervisor_cls.return_value.run_mission.call_count == 1
+        assert connector_call_count["n"] == 1
+
+    assert first.outcome == ProcessingOutcome.SUCCEEDED
+    assert second.outcome == ProcessingOutcome.DUPLICATE_ALREADY_PROCESSED
 
 
 def test_already_leased_duplicate_does_not_start_second_execution() -> None:

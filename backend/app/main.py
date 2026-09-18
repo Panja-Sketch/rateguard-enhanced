@@ -5,6 +5,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.assurance import router as assurance_router
+from app.api.connectors import router as connectors_router
 from app.api.health import router as health_router
 from app.api.missions import router as missions_router
 from app.api.sources import router as sources_router
@@ -44,6 +45,7 @@ app.include_router(health_router)
 app.include_router(assurance_router)
 app.include_router(missions_router)
 app.include_router(sources_router)
+app.include_router(connectors_router)
 app.include_router(worker_router)
 app.include_router(system_status_router)
 

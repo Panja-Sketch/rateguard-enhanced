@@ -449,6 +449,54 @@ def get_mission_gemini_evidence(mission_id: str) -> dict[str, Any]:
     }
 
 
+_SAFE_CONNECTOR_EVIDENCE_FIELDS = (
+    "connector_id",
+    "engine_version",
+    "correlation_id",
+    "connector_request_id",
+    "request_sha256",
+    "response_sha256",
+    "status",
+    "final_premium",
+    "error_code",
+)
+
+
+@router.get("/missions/{mission_id}/connector-evidence")
+def get_mission_connector_evidence(mission_id: str) -> dict[str, Any]:
+    """Read-only, sanitized connector-invocation evidence for one mission.
+
+    Every returned object is built from an explicit field whitelist
+    (`_SAFE_CONNECTOR_EVIDENCE_FIELDS`) — hashes and status only. Never a
+    base URL, credential, raw request/response body, or stack trace.
+    """
+    store = get_run_store()
+    record = store.get_run(mission_id)
+    if not record:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Assurance mission '{mission_id}' not found.",
+        )
+
+    from app.storage import EvidenceType
+
+    evidence_records = store.get_evidence(mission_id)
+    invocations = []
+    for ev in evidence_records:
+        if ev.evidence_type != EvidenceType.CONNECTOR_INVOCATION:
+            continue
+        raw = ev.data_summary if isinstance(ev.data_summary, dict) else {}
+        sanitized = {field: raw.get(field) for field in _SAFE_CONNECTOR_EVIDENCE_FIELDS}
+        sanitized["evidence_id"] = ev.evidence_id
+        invocations.append(sanitized)
+
+    return {
+        "mission_id": mission_id,
+        "connector_invocation_count": len(invocations),
+        "connector_invocations": invocations,
+    }
+
+
 class AlignmentOptionsRequest(BaseModel):
     """Which source the caller wants treated as the alignment reference."""
 

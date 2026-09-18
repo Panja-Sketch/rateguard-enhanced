@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 import json
 import time
@@ -26,8 +27,14 @@ from app.agents.decision_schemas import (
     TestSelectionDecision,
 )
 from app.agents.gemini_client import GeminiDecisionClient, GeminiInvocationEvidence
+from app.connectors.budget import TargetBudget
+from app.connectors.client import ConnectorClient
+from app.connectors.contract import ConnectorQuoteRequest
+from app.connectors.errors import ConnectorException, ConnectorFailureCategory
 from app.engines.diff import SemanticDiffEngine
+from app.engines.diff.models import SemanticDiffResult
 from app.engines.impact import PricingImpactEngine
+from app.engines.impact.models import ImpactAnalysis
 from app.engines.oracle.calculator import PremiumOracleCalculator
 from app.engines.portfolio import PortfolioExposureAnalyzer
 from app.engines.reconciliation import PricingReconciliationEngine
@@ -42,6 +49,7 @@ from app.models import (
     AssuranceResultV2,
     BlastRadiusResult,
     ComparisonMode,
+    ConnectorSelection,
     ExperimentsData,
     ImpactAnalysisData,
     MaterialFinding,
@@ -54,6 +62,7 @@ from app.models import (
     SemanticAnalysisData,
     ToolInvocation,
 )
+from app.models.stages import MissionStage, StageRecorder, StageStatus
 from app.services.finding_conversion import to_material_findings
 from app.services.mission_transitions import apply_transition
 from app.services.remediation_service import RemediationService
@@ -108,7 +117,12 @@ class AssuranceSupervisor:
     a Gemini outage can never corrupt or block deterministic calculations.
     """
 
-    def __init__(self, store: BaseRunStore, gemini_client: GeminiDecisionClient | None = None):
+    def __init__(
+        self,
+        store: BaseRunStore,
+        gemini_client: GeminiDecisionClient | None = None,
+        connector_client_factory: "Callable[[], ConnectorClient] | None" = None,
+    ):
         self.store = store
         self.semantic_diff_engine = SemanticDiffEngine()
         self.impact_engine = PricingImpactEngine()
@@ -117,6 +131,10 @@ class AssuranceSupervisor:
         self.portfolio_analyzer = PortfolioExposureAnalyzer()
         self.remediation_service = RemediationService()
         self.gemini = gemini_client if gemini_client is not None else GeminiDecisionClient(get_agent_config())
+        # Injectable for tests — e.g. a ConnectorClient(transport=httpx.ASGITransport(...))
+        # wrapping the real rating_engine app, or a fake client for failure-mode tests.
+        # Production code never overrides this; the default constructs a real client.
+        self._connector_client_factory = connector_client_factory or (lambda: ConnectorClient())
 
     def _mark_stage(self, mission_id: str, stage_name: str) -> None:
         """Persists a real stage-start event and updates current_stage BEFORE that
@@ -142,9 +160,29 @@ class AssuranceSupervisor:
         except Exception:
             return False
 
+    def _finalize_stage_outcomes(
+        self, recorder: StageRecorder, result: AssuranceResultV2, fallback_reason: str
+    ) -> None:
+        """Backfills any `MissionStage` not yet recorded as NOT_APPLICABLE with
+        `fallback_reason` (used on early-exit paths — validation failure,
+        cancellation, the clean-equivalence fast path — so every stage is
+        still visible with a reason, never silently missing), then writes the
+        ledger onto `result`. Idempotent: stages already recorded are left as-is."""
+        for stage in recorder.missing_stages():
+            recorder.record(stage, StageStatus.NOT_APPLICABLE, reason=fallback_reason)
+        result.stage_outcomes = recorder.outcomes()
+
     def _finalize_cancelled(
-        self, mission: AssuranceMission, result: AssuranceResultV2, agent_actions: list[AgentAction]
+        self,
+        mission: AssuranceMission,
+        result: AssuranceResultV2,
+        agent_actions: list[AgentAction],
+        recorder: "StageRecorder | None" = None,
     ) -> AssuranceResultV2:
+        if recorder is not None:
+            self._finalize_stage_outcomes(
+                recorder, result, "Mission was cancelled before this stage was reached."
+            )
         result.overall_status = "CANCELLED"
         mission.status = MissionStatus.CANCELLED
         transition = apply_transition(
@@ -429,6 +467,7 @@ class AssuranceSupervisor:
         mission: AssuranceMission,
         left_pkg: IPIRPackage,
         right_pkg: IPIRPackage | None = None,
+        target_connector: ConnectorSelection | None = None,
         cancellation_check: "Callable[[], bool] | None" = None,
     ) -> AssuranceResultV2:
         agent_actions: list[AgentAction] = []
@@ -437,6 +476,10 @@ class AssuranceSupervisor:
         budget = _InvestigationBudget()
         raw_diff_result = None
         test_plan = None
+        recorder = StageRecorder()
+        # Set once real connector probing begins; used at STAGE 8 and by
+        # EVIDENCE_FINALIZATION to describe TARGET_EXECUTION honestly.
+        connector_probe_outcomes: list[str] = []  # "SUCCESS" | "CONNECTOR_FAILURE" | "PARTIAL_RESPONSE" per probe
 
         result = AssuranceResultV2(
             mission_id=mission.mission_id,
@@ -473,6 +516,10 @@ class AssuranceSupervisor:
         agent_actions.append(action_val)
 
         if val_issues:
+            recorder.record(
+                MissionStage.REQUEST_VALIDATION, StageStatus.FAILED,
+                reason="; ".join(f"{i.field}: {i.message}" for i in val_issues),
+            )
             result.validation = SectionResult(
                 status=AnalysisStatus.FAILED,
                 error_message="Mission validation failed.",
@@ -481,8 +528,12 @@ class AssuranceSupervisor:
             result.overall_status = "FAILED"
             mission.status = MissionStatus.FAILED
             mission.validation_issues = val_issues
+            self._finalize_stage_outcomes(recorder, result, "Mission failed request validation before this stage was reached.")
             self._update_mission_record(mission, result, agent_actions)
             return result
+
+        recorder.record(MissionStage.REQUEST_VALIDATION, StageStatus.COMPLETED)
+        recorder.record(MissionStage.SOURCE_A_LOAD, StageStatus.COMPLETED)
 
         result.validation = SectionResult(
             status=AnalysisStatus.SUCCEEDED,
@@ -519,10 +570,44 @@ class AssuranceSupervisor:
                 review_reasons.append(
                     f"Source A jurisdiction ({left_jur}) does not match Source B jurisdiction ({right_jur})."
                 )
+            else:
+                left_end = left_pkg.effective_period.end
+                right_end = right_pkg.effective_period.end
+                overlaps = left_pkg.effective_period.start <= (right_end or left_pkg.effective_period.start) and (
+                    right_pkg.effective_period.start <= (left_end or right_pkg.effective_period.start)
+                )
+                if not overlaps:
+                    review_reasons.append(
+                        "Source A and Source B effective periods do not overlap: "
+                        f"A=[{left_pkg.effective_period.start}, {left_end or 'open'}], "
+                        f"B=[{right_pkg.effective_period.start}, {right_end or 'open'}]."
+                    )
         review_required = bool(review_reasons)
 
+        if right_pkg is not None:
+            recorder.record(MissionStage.SOURCE_B_LOAD_OR_CONNECTOR_CHECK, StageStatus.COMPLETED)
+        elif target_connector is not None:
+            recorder.record(
+                MissionStage.SOURCE_B_LOAD_OR_CONNECTOR_CHECK, StageStatus.COMPLETED,
+                reason=None,
+            )
+        else:
+            recorder.record(
+                MissionStage.SOURCE_B_LOAD_OR_CONNECTOR_CHECK, StageStatus.NOT_APPLICABLE,
+                reason="No Source B (IPIR package or connector) was provided for this mission.",
+            )
+        if review_required:
+            recorder.record(MissionStage.COMPATIBILITY_GATE, StageStatus.REVIEW_REQUIRED, reason=" ".join(review_reasons))
+        else:
+            recorder.record(MissionStage.COMPATIBILITY_GATE, StageStatus.COMPLETED)
+        # Note: for the connector path (no right_pkg), only the compilation-
+        # uncertainty half of this gate applies today -- a live REST connector
+        # has no declared product/jurisdiction/effective-period metadata to
+        # compare against (ConnectorRegistryEntry carries none), so that
+        # narrower comparison is honestly skipped rather than fabricated.
+
         if self._is_cancelled(mission.mission_id, cancellation_check):
-            return self._finalize_cancelled(mission, result, agent_actions)
+            return self._finalize_cancelled(mission, result, agent_actions, recorder)
 
         # -------------------------------------------------------------
         # STAGE 2: Semantic Analysis (EQUIVALENCE & RELEASE_CONFORMANCE)
@@ -589,7 +674,7 @@ class AssuranceSupervisor:
             prioritized_diff_ids: list[str] = [d.finding_id for d in sem_diffs]
             if sem_diffs:
                 if self._is_cancelled(mission.mission_id, cancellation_check):
-                    return self._finalize_cancelled(mission, result, agent_actions)
+                    return self._finalize_cancelled(mission, result, agent_actions, recorder)
 
                 candidate_ids = set(prioritized_diff_ids)
                 decision, evidence = self._ask_gemini(
@@ -625,11 +710,21 @@ class AssuranceSupervisor:
 
             if len(sem_diffs) == 0:
                 is_clean_equivalence = True
+            recorder.record(MissionStage.SEMANTIC_DIFF, StageStatus.COMPLETED)
         else:
             prioritized_diff_ids = []
             result.semantic_analysis = SectionResult(
                 status=AnalysisStatus.NOT_RUN,
                 reason="Semantic comparison skipped: no comparison target available.",
+            )
+            recorder.record(
+                MissionStage.SEMANTIC_DIFF, StageStatus.NOT_APPLICABLE,
+                reason=(
+                    "A live connector target has no AST to compare against; semantic diff "
+                    "requires two IPIR packages."
+                    if target_connector is not None
+                    else "No comparison target (Source B) was provided for this mission."
+                ),
             )
 
         # -------------------------------------------------------------
@@ -645,6 +740,11 @@ class AssuranceSupervisor:
                 latency_ms=15.0,
             )
             agent_actions.append(action_clean)
+            recorder.record(MissionStage.DEPENDENCY_IMPACT, StageStatus.COMPLETED)
+            recorder.record(MissionStage.TEST_CANDIDATE_GENERATION, StageStatus.COMPLETED)
+            recorder.record(MissionStage.TEST_SELECTION, StageStatus.COMPLETED)
+            recorder.record(MissionStage.ORACLE_EXECUTION, StageStatus.COMPLETED)
+            recorder.record(MissionStage.TARGET_EXECUTION, StageStatus.COMPLETED)
 
             oracle = PremiumOracleCalculator(left_pkg)
             target_calc = PremiumOracleCalculator(right_pkg)
@@ -729,6 +829,13 @@ class AssuranceSupervisor:
 
                 result.overall_status = "COMPLETED"
                 mission.status = MissionStatus.COMPLETED
+                recorder.record(MissionStage.DECISION, StageStatus.COMPLETED)
+                self._finalize_stage_outcomes(
+                    recorder, result,
+                    "Not applicable: zero behavioral mismatches reproduced in the clean-equivalence fast path.",
+                )
+                recorder.record(MissionStage.EVIDENCE_FINALIZATION, StageStatus.COMPLETED)
+                result.stage_outcomes = recorder.outcomes()
                 self._update_mission_record(mission, result, agent_actions)
                 return result
 
@@ -799,6 +906,19 @@ class AssuranceSupervisor:
                 ),
             )
 
+            recorder.record(MissionStage.RECONCILIATION, StageStatus.COMPLETED)
+            recorder.record(
+                MissionStage.PORTFOLIO_IMPACT, StageStatus.NOT_APPLICABLE,
+                reason="Portfolio scan skipped pending root-cause triage of the semantic-diff blind spot.",
+            )
+            recorder.record(MissionStage.DECISION, StageStatus.COMPLETED)
+            self._finalize_stage_outcomes(
+                recorder, result,
+                "Not applicable: mission resolved via the semantic-diff-blind-spot fast path.",
+            )
+            recorder.record(MissionStage.EVIDENCE_FINALIZATION, StageStatus.COMPLETED)
+            result.stage_outcomes = recorder.outcomes()
+
             result.overall_status = "COMPLETED"
             mission.status = MissionStatus.COMPLETED
             self._update_mission_record(mission, result, agent_actions)
@@ -808,7 +928,7 @@ class AssuranceSupervisor:
         # BRANCH B: MATERIAL DRIFT OR RUNTIME VERIFICATION
         # -------------------------------------------------------------
         if self._is_cancelled(mission.mission_id, cancellation_check):
-            return self._finalize_cancelled(mission, result, agent_actions)
+            return self._finalize_cancelled(mission, result, agent_actions, recorder)
 
         # STAGE 3: Impact Analysis (DAG Traversal)
         self._mark_stage(mission.mission_id, "IMPACT_ANALYSIS")
@@ -837,28 +957,59 @@ class AssuranceSupervisor:
                 latency_ms=imp_latency,
             )
             agent_actions.append(action_imp)
+            recorder.record(MissionStage.DEPENDENCY_IMPACT, StageStatus.COMPLETED)
         else:
             raw_impact = None
             result.impact_analysis = SectionResult(
                 status=AnalysisStatus.NOT_RUN,
                 reason="Dependency impact graph traversal skipped: no comparison target available.",
             )
+            recorder.record(
+                MissionStage.DEPENDENCY_IMPACT, StageStatus.NOT_APPLICABLE,
+                reason=(
+                    "A live connector target has no AST diffs to trace impact from."
+                    if target_connector is not None
+                    else "Dependency impact graph traversal skipped: no comparison target available."
+                ),
+            )
 
         if self._is_cancelled(mission.mission_id, cancellation_check):
-            return self._finalize_cancelled(mission, result, agent_actions)
+            return self._finalize_cancelled(mission, result, agent_actions, recorder)
 
         # STAGE 4: Risk-Directed Boundary Testing / Black-Box Probes
         self._mark_stage(mission.mission_id, "RISK_DIRECTED_TESTING")
         exp_start = time.time()
-        if raw_diff_result and raw_impact:
+        if target_connector is not None:
+            # A connector target has no comparable IPIR package to diff against
+            # Source A, so there are no semantic differences to target. Instead
+            # of duplicating candidate-generation logic, this synthesizes a
+            # zero-difference self-comparison (left_pkg vs itself) so the
+            # existing, already-tested boundary/range-generation logic in
+            # `RiskDirectedTestGenerator`/`generate_candidate_scenarios` runs
+            # unmodified — it derives its boundary scenarios from `left_pkg`'s
+            # own tables/ranges, not from the (empty) diff list.
+            synthetic_diff = SemanticDiffResult(
+                left_package_id=left_pkg.id,
+                right_package_id=left_pkg.id,
+                left_version=left_pkg.version,
+                right_version=left_pkg.version,
+                differences=[],
+            )
+            synthetic_impact = ImpactAnalysis(package_id=left_pkg.id)
+            test_plan = self.test_generator.generate_plan(left_pkg, synthetic_diff, synthetic_impact)
+            selected_tests = test_plan.selected_scenarios
+            recorder.record(MissionStage.TEST_CANDIDATE_GENERATION, StageStatus.COMPLETED)
+            recorder.record(MissionStage.TEST_SELECTION, StageStatus.COMPLETED)
+        elif raw_diff_result and raw_impact:
             test_plan = self.test_generator.generate_plan(left_pkg, raw_diff_result, raw_impact)
             selected_tests = test_plan.selected_scenarios  # deterministic default
+            recorder.record(MissionStage.TEST_CANDIDATE_GENERATION, StageStatus.COMPLETED)
 
             # Real Gemini decision point: select which deterministically-generated
             # candidate boundary tests to execute. Gemini may only choose scenario
             # ids from the candidate pool the optimizer already produced.
             if self._is_cancelled(mission.mission_id, cancellation_check):
-                return self._finalize_cancelled(mission, result, agent_actions)
+                return self._finalize_cancelled(mission, result, agent_actions, recorder)
 
             candidate_pool: dict[str, PricingTestScenario] = {sc.id: sc for sc in test_plan.candidate_scenarios}
             prioritized_set = set(prioritized_diff_ids)
@@ -901,8 +1052,17 @@ class AssuranceSupervisor:
                     f"Deterministic fallback: using optimizer-selected {len(selected_tests)} boundary tests.",
                     evidence, is_gemini=False, fallback_reason=reason,
                 ))
+            recorder.record(MissionStage.TEST_SELECTION, StageStatus.COMPLETED)
         else:
             selected_tests = []
+            recorder.record(
+                MissionStage.TEST_CANDIDATE_GENERATION, StageStatus.NOT_APPLICABLE,
+                reason="No comparison target available to generate targeted test candidates from.",
+            )
+            recorder.record(
+                MissionStage.TEST_SELECTION, StageStatus.NOT_APPLICABLE,
+                reason="No test candidates were generated for this mission.",
+            )
 
         experiments_list: list[RuntimeExperiment] = []
         mismatch_count = 0
@@ -911,12 +1071,115 @@ class AssuranceSupervisor:
         oracle = PremiumOracleCalculator(left_pkg)
         target_calc = PremiumOracleCalculator(right_pkg) if right_pkg else None
 
-        def _run_probe(tc: PricingTestScenario) -> tuple[Decimal, Decimal]:
+        connector_client = self._connector_client_factory() if target_connector is not None else None
+        connector_budget = TargetBudget() if target_connector is not None else None
+        connector_evidence_ids: list[str] = []
+
+        def _quote_via_connector(tc: PricingTestScenario) -> tuple[Decimal | None, str]:
+            """Bridges the sync probe loop to the async `ConnectorClient` via
+            `asyncio.run()`. Safe here because the entire call chain
+            (worker_endpoint -> AssuranceWorker -> MissionExecutionService ->
+            run_mission) is synchronous with no already-running event loop.
+            Returns (final_premium_or_None, status) where status is one of
+            "SUCCESS", "PARTIAL_RESPONSE", or "CONNECTOR_FAILURE" — `None` is
+            returned on any failure so a mismatch is never accidentally
+            treated as a match (see the `is not None` guard at the call site)."""
+            # Decimal isn't JSON-serializable and dates are sent as ISO strings;
+            # every other type (int/str/bool) is forwarded as-is so a numeric
+            # input like roof_age stays a JSON number, matching the demo
+            # target's own proven-working golden-case request shape
+            # (`rating_engine/startup_selftest.py::GOLDEN_CASE_INPUTS`) rather
+            # than being stringified into something the target's range/table
+            # comparisons were never built to handle.
+            connector_inputs: dict[str, Any] = {}
+            for k, v in tc.risk_values.items():
+                if k in ("transaction_type", "effective_date"):
+                    # "effective_date" inside risk_values is a
+                    # PremiumOracleCalculator-only convention (see
+                    # app.engines.oracle.calculator) — the connector already
+                    # receives the real effective date via its own
+                    # ConnectorQuoteRequest.effective_date field above.
+                    continue
+                if isinstance(v, Decimal):
+                    connector_inputs[k] = str(v)
+                elif hasattr(v, "isoformat"):
+                    connector_inputs[k] = v.isoformat()
+                else:
+                    connector_inputs[k] = v
+            req = ConnectorQuoteRequest(
+                engine_version=target_connector.engine_version,
+                product=mission.objective.product,
+                jurisdiction=mission.objective.jurisdiction,
+                effective_date=left_pkg.effective_period.start,
+                transaction_type=tc.risk_values.get("transaction_type", "NEW_BUSINESS"),
+                inputs=connector_inputs,
+                trace_requested=True,
+            )
+            req_hash = hashlib.sha256(req.model_dump_json().encode()).hexdigest()
+            try:
+                resp = asyncio.run(
+                    connector_client.send_quote(
+                        target_connector.connector_id, target_connector.engine_version, req,
+                        budget=connector_budget, correlation_id=mission.mission_id,
+                    )
+                )
+            except ConnectorException as exc:
+                status = "PARTIAL_RESPONSE" if exc.category == ConnectorFailureCategory.REVIEW_REQUIRED else "CONNECTOR_FAILURE"
+                ev = EvidenceRecord(
+                    evidence_id=f"EV-{uuid.uuid4().hex[:6].upper()}",
+                    run_id=mission.mission_id,
+                    evidence_type=EvidenceType.CONNECTOR_INVOCATION,
+                    title=f"Connector Quote: {target_connector.connector_id}@{target_connector.engine_version}",
+                    description=f"Scenario '{tc.name}' probe failed: {exc.error.code}.",
+                    data_summary={
+                        "connector_id": target_connector.connector_id,
+                        "engine_version": target_connector.engine_version,
+                        "correlation_id": mission.mission_id,
+                        "request_sha256": req_hash,
+                        "response_sha256": None,
+                        "status": status,
+                        "error_code": exc.error.code,
+                        "final_premium": None,
+                    },
+                )
+                self.store.add_evidence(mission.mission_id, ev)
+                connector_evidence_ids.append(ev.evidence_id)
+                connector_probe_outcomes.append(status)
+                return None, status
+
+            premium_str = resp.outputs.get("final_premium")
+            resp_hash = hashlib.sha256(resp.model_dump_json().encode()).hexdigest()
+            status = "SUCCESS" if premium_str else "PARTIAL_RESPONSE"
+            ev = EvidenceRecord(
+                evidence_id=f"EV-{uuid.uuid4().hex[:6].upper()}",
+                run_id=mission.mission_id,
+                evidence_type=EvidenceType.CONNECTOR_INVOCATION,
+                title=f"Connector Quote: {target_connector.connector_id}@{target_connector.engine_version}",
+                description=f"Scenario '{tc.name}' probed against connector.",
+                data_summary={
+                    "connector_id": target_connector.connector_id,
+                    "engine_version": target_connector.engine_version,
+                    "correlation_id": mission.mission_id,
+                    "connector_request_id": resp.request_id,
+                    "request_sha256": req_hash,
+                    "response_sha256": resp_hash,
+                    "status": status,
+                    "final_premium": premium_str,
+                },
+            )
+            self.store.add_evidence(mission.mission_id, ev)
+            connector_evidence_ids.append(ev.evidence_id)
+            connector_probe_outcomes.append(status)
+            return (Decimal(premium_str) if premium_str else None), status
+
+        def _run_probe(tc: PricingTestScenario) -> tuple[Decimal, Decimal | None]:
             """Executes exactly one deterministic premium-oracle-vs-target probe.
             Which scenario reaches this function is Gemini's only discretion —
             the arithmetic itself is untouched deterministic engine code."""
             exp_prem = oracle.calculate_policy_premium(tc.risk_values).final_premium
-            if target_calc:
+            if target_connector is not None:
+                act_prem, _status = _quote_via_connector(tc)
+            elif target_calc:
                 act_prem = target_calc.calculate_policy_premium(tc.risk_values).final_premium
             else:
                 act_prem = Decimal("0.00")
@@ -924,7 +1187,7 @@ class AssuranceSupervisor:
 
         for tc in selected_tests:
             exp_prem, act_prem = _run_probe(tc)
-            matched = exp_prem == act_prem
+            matched = act_prem is not None and exp_prem == act_prem
             if matched:
                 match_count += 1
             else:
@@ -939,7 +1202,7 @@ class AssuranceSupervisor:
                     category="RISK_DIRECTED",
                     risk_inputs=tc.risk_values,
                     expected_premium=str(exp_prem),
-                    actual_premium=str(act_prem),
+                    actual_premium=(str(act_prem) if act_prem is not None else "N/A (connector failure or partial response)"),
                     matches=matched,
                 )
             )
@@ -956,7 +1219,7 @@ class AssuranceSupervisor:
             and budget.gemini_call_count < MAX_GEMINI_CALLS_PER_MISSION
         ):
             if self._is_cancelled(mission.mission_id, cancellation_check):
-                return self._finalize_cancelled(mission, result, agent_actions)
+                return self._finalize_cancelled(mission, result, agent_actions, recorder)
 
             remaining_pool = {
                 sc.id: sc for sc in test_plan.candidate_scenarios if sc.id not in budget.executed_test_ids
@@ -1015,7 +1278,7 @@ class AssuranceSupervisor:
             for extra_id in extra_ids:
                 tc = remaining_pool[extra_id]
                 exp_prem, act_prem = _run_probe(tc)
-                matched = exp_prem == act_prem
+                matched = act_prem is not None and exp_prem == act_prem
                 if matched:
                     match_count += 1
                 else:
@@ -1028,7 +1291,7 @@ class AssuranceSupervisor:
                         category="ADDITIONAL_PROBE",
                         risk_inputs=tc.risk_values,
                         expected_premium=str(exp_prem),
-                        actual_premium=str(act_prem),
+                        actual_premium=(str(act_prem) if act_prem is not None else "N/A (connector failure or partial response)"),
                         matches=matched,
                     )
                 )
@@ -1058,8 +1321,50 @@ class AssuranceSupervisor:
         )
         agent_actions.append(action_exp)
 
+        # Connector-specific TARGET_EXECUTION accounting: distinguish "every
+        # probe hard-failed" (connector unreachable/timed out entirely) from
+        # "some/all probes succeeded but disagreed on price" (a genuine
+        # premium mismatch) and from "a partial-response category failure"
+        # (never counted as a confirmed mismatch AND never silently ignored).
+        connector_all_probes_failed = False
+        connector_any_partial_response = False
+        if target_connector is not None:
+            recorder.record(MissionStage.ORACLE_EXECUTION, StageStatus.COMPLETED)
+            if not connector_probe_outcomes:
+                recorder.record(
+                    MissionStage.TARGET_EXECUTION, StageStatus.FAILED,
+                    reason="No connector probes were executed for this mission.",
+                )
+            else:
+                connector_any_partial_response = "PARTIAL_RESPONSE" in connector_probe_outcomes
+                connector_all_probes_failed = all(s != "SUCCESS" for s in connector_probe_outcomes)
+                if connector_all_probes_failed:
+                    recorder.record(
+                        MissionStage.TARGET_EXECUTION, StageStatus.FAILED,
+                        reason=f"All {len(connector_probe_outcomes)} connector probe(s) failed to return a premium.",
+                    )
+                elif connector_any_partial_response:
+                    recorder.record(
+                        MissionStage.TARGET_EXECUTION, StageStatus.REVIEW_REQUIRED,
+                        reason="One or more connector probes returned a partial/incomplete response.",
+                    )
+                else:
+                    recorder.record(MissionStage.TARGET_EXECUTION, StageStatus.COMPLETED)
+        elif selected_tests:
+            recorder.record(MissionStage.ORACLE_EXECUTION, StageStatus.COMPLETED)
+            recorder.record(MissionStage.TARGET_EXECUTION, StageStatus.COMPLETED if right_pkg else StageStatus.NOT_APPLICABLE, reason=None if right_pkg else "No comparison target available.")
+        else:
+            recorder.record(
+                MissionStage.ORACLE_EXECUTION, StageStatus.NOT_APPLICABLE,
+                reason="No test scenarios were generated to execute.",
+            )
+            recorder.record(
+                MissionStage.TARGET_EXECUTION, StageStatus.NOT_APPLICABLE,
+                reason="No test scenarios were generated to execute.",
+            )
+
         if self._is_cancelled(mission.mission_id, cancellation_check):
-            return self._finalize_cancelled(mission, result, agent_actions)
+            return self._finalize_cancelled(mission, result, agent_actions, recorder)
 
         # STAGE 5: Trace Reconciliation & Root Cause Analysis
         self._mark_stage(mission.mission_id, "RECONCILIATION")
@@ -1086,14 +1391,47 @@ class AssuranceSupervisor:
                     root_cause=rc_finding,
                 ),
             )
+            recorder.record(MissionStage.RECONCILIATION, StageStatus.COMPLETED)
+        elif target_connector is not None and mismatch_count > 0:
+            first_mismatch = next(e for e in experiments_list if not e.matches)
+            first_div = first_mismatch.first_divergent_node or "connector_final_premium"
+            result.reconciliation = SectionResult(
+                status=AnalysisStatus.SUCCEEDED,
+                data=ReconciliationData(
+                    mismatch_count=mismatch_count,
+                    first_divergent_node=first_div,
+                    root_cause=RootCauseFinding(
+                        node_id=first_div,
+                        title="Connector Premium Divergence",
+                        explanation=(
+                            f"Independent IPIR oracle (Source A) computed {first_mismatch.expected_premium} "
+                            f"for scenario '{first_mismatch.probe_name}'; connector "
+                            f"'{target_connector.connector_id}@{target_connector.engine_version}' "
+                            f"returned {first_mismatch.actual_premium}."
+                        ),
+                        expected_value=first_mismatch.expected_premium,
+                        actual_value=first_mismatch.actual_premium,
+                        divergence_type=(
+                            "CONNECTOR_FAILURE"
+                            if first_mismatch.actual_premium.startswith("N/A")
+                            else "CONNECTOR_PREMIUM_MISMATCH"
+                        ),
+                    ),
+                ),
+            )
+            recorder.record(MissionStage.RECONCILIATION, StageStatus.COMPLETED)
         else:
             result.reconciliation = SectionResult(
                 status=AnalysisStatus.NOT_RUN,
                 reason="Zero price divergences reproduced during experiment probing.",
             )
+            recorder.record(
+                MissionStage.RECONCILIATION, StageStatus.NOT_APPLICABLE,
+                reason="Zero price divergences reproduced during experiment probing.",
+            )
 
         if self._is_cancelled(mission.mission_id, cancellation_check):
-            return self._finalize_cancelled(mission, result, agent_actions)
+            return self._finalize_cancelled(mission, result, agent_actions, recorder)
 
         # STAGE 6: Portfolio Blast Radius & Measured Telemetry
         self._mark_stage(mission.mission_id, "PORTFOLIO_ANALYSIS")
@@ -1106,7 +1444,7 @@ class AssuranceSupervisor:
         run_portfolio = True
         if right_pkg and mismatch_count == 0:
             if self._is_cancelled(mission.mission_id, cancellation_check):
-                return self._finalize_cancelled(mission, result, agent_actions)
+                return self._finalize_cancelled(mission, result, agent_actions, recorder)
 
             decision, evidence = self._ask_gemini(
                 mission.mission_id, budget, "PORTFOLIO_JUSTIFICATION", PortfolioAnalysisDecision,
@@ -1176,19 +1514,53 @@ class AssuranceSupervisor:
                 latency_ms=port_duration * 1000,
             )
             agent_actions.append(action_blast)
+            recorder.record(MissionStage.PORTFOLIO_IMPACT, StageStatus.COMPLETED)
         elif right_pkg and not run_portfolio:
             result.blast_radius = SectionResult(
                 status=AnalysisStatus.NOT_RUN,
                 reason="Portfolio blast radius scan waived by Gemini justification (zero premium mismatches reproduced).",
+            )
+            recorder.record(
+                MissionStage.PORTFOLIO_IMPACT, StageStatus.NOT_APPLICABLE,
+                reason="Waived by Gemini justification (zero premium mismatches reproduced).",
             )
         else:
             result.blast_radius = SectionResult(
                 status=AnalysisStatus.NOT_RUN,
                 reason="Portfolio blast radius evaluation requires a full IPIR target package or accessible portfolio batch execution.",
             )
+            recorder.record(
+                MissionStage.PORTFOLIO_IMPACT, StageStatus.NOT_APPLICABLE,
+                reason=(
+                    "A live connector target does not produce a batch-evaluable IPIR package; portfolio "
+                    "blast-radius scanning against a connector target is out of scope for this session."
+                    if target_connector is not None
+                    else "Portfolio blast radius evaluation requires a full IPIR target package."
+                ),
+            )
+
+        # Consumer-protection modules not built in this codebase (genuinely
+        # out of scope for this session, not a skipped-but-available
+        # feature) — always NOT_APPLICABLE, never fabricated.
+        recorder.record(
+            MissionStage.COHORT_DISTRIBUTION, StageStatus.NOT_APPLICABLE,
+            reason="Consumer cohort-distribution analysis is not built in this codebase; out of scope for this session.",
+        )
+        recorder.record(
+            MissionStage.PIPELINE_IMPACT, StageStatus.NOT_APPLICABLE,
+            reason="Deployment-pipeline impact analysis is not built in this codebase; out of scope for this session.",
+        )
+        recorder.record(
+            MissionStage.EXPLANATION_FACTS, StageStatus.NOT_APPLICABLE,
+            reason="Structured explanation-facts generation is not built in this codebase; out of scope for this session.",
+        )
+        recorder.record(
+            MissionStage.EXPLANATION_DRAFT, StageStatus.NOT_APPLICABLE,
+            reason="Natural-language explanation drafting is not built in this codebase; out of scope for this session.",
+        )
 
         if self._is_cancelled(mission.mission_id, cancellation_check):
-            return self._finalize_cancelled(mission, result, agent_actions)
+            return self._finalize_cancelled(mission, result, agent_actions, recorder)
 
         # STAGE 7: Remediation Proposal & Revalidation
         self._mark_stage(mission.mission_id, "REMEDIATION")
@@ -1205,7 +1577,7 @@ class AssuranceSupervisor:
                 # demand, only after a human explicitly picks a reference source,
                 # via POST /missions/{id}/alignment-options.
                 if self._is_cancelled(mission.mission_id, cancellation_check):
-                    return self._finalize_cancelled(mission, result, agent_actions)
+                    return self._finalize_cancelled(mission, result, agent_actions, recorder)
 
                 decision, evidence = self._ask_gemini(
                     mission.mission_id, budget, "PROPOSE_ALIGNMENT_OPTIONS", AlignmentOptionsDecision,
@@ -1256,6 +1628,14 @@ class AssuranceSupervisor:
                     status=AnalysisStatus.NOT_RUN,
                     reason="Revalidation is generated together with the on-demand alignment option.",
                 )
+                recorder.record(
+                    MissionStage.REMEDIATION, StageStatus.NOT_APPLICABLE,
+                    reason="Equivalence mode is symmetric; a directional patch is only generated on demand.",
+                )
+                recorder.record(
+                    MissionStage.REVALIDATION, StageStatus.NOT_APPLICABLE,
+                    reason="Revalidation is generated together with the on-demand alignment option.",
+                )
             else:
                 # Real Gemini decision point: propose a structured remediation candidate
                 # by selecting which confirmed findings to correct. Gemini may only
@@ -1263,7 +1643,7 @@ class AssuranceSupervisor:
                 # remediation service applies each finding's own recorded intent_value —
                 # Gemini never supplies or invents a corrected number itself.
                 if self._is_cancelled(mission.mission_id, cancellation_check):
-                    return self._finalize_cancelled(mission, result, agent_actions)
+                    return self._finalize_cancelled(mission, result, agent_actions, recorder)
 
                 decision, evidence = self._ask_gemini(
                     mission.mission_id, budget, "PROPOSE_REMEDIATION", RemediationProposalDecision,
@@ -1321,7 +1701,7 @@ class AssuranceSupervisor:
 
                 if test_plan is not None and (targeted_ids or control_ids):
                     if self._is_cancelled(mission.mission_id, cancellation_check):
-                        return self._finalize_cancelled(mission, result, agent_actions)
+                        return self._finalize_cancelled(mission, result, agent_actions, recorder)
 
                     decision2, evidence2 = self._ask_gemini(
                         mission.mission_id, budget, "SELECT_REVALIDATION_TESTS", RemediationRevalidationSelectionDecision,
@@ -1365,6 +1745,8 @@ class AssuranceSupervisor:
                     status=AnalysisStatus.SUCCEEDED,
                     data=reval_res,
                 )
+                recorder.record(MissionStage.REMEDIATION, StageStatus.COMPLETED)
+                recorder.record(MissionStage.REVALIDATION, StageStatus.COMPLETED)
         else:
             result.remediation = SectionResult(
                 status=AnalysisStatus.NOT_RUN,
@@ -1374,19 +1756,67 @@ class AssuranceSupervisor:
                 status=AnalysisStatus.NOT_RUN,
                 reason="Revalidation omitted.",
             )
+            recorder.record(
+                MissionStage.REMEDIATION, StageStatus.NOT_APPLICABLE,
+                reason=(
+                    "A live connector target cannot be auto-patched; remediation requires a comparable "
+                    "IPIR package for Source B."
+                    if target_connector is not None
+                    else "Remediation proposal not required: no confirmed semantic differences."
+                ),
+            )
+            recorder.record(
+                MissionStage.REVALIDATION, StageStatus.NOT_APPLICABLE,
+                reason="No remediation was generated for this mission.",
+            )
 
         if self._is_cancelled(mission.mission_id, cancellation_check):
-            return self._finalize_cancelled(mission, result, agent_actions)
+            return self._finalize_cancelled(mission, result, agent_actions, recorder)
 
         # STAGE 8: Final Release Decision
         self._mark_stage(mission.mission_id, "DECISION")
         blocking_reasons: list[str] = []
         if mismatch_count > 0:
-            blocking_reasons.append(f"{mismatch_count} price calculation mismatches reproduced.")
+            if connector_all_probes_failed:
+                blocking_reasons.append(
+                    f"Connector '{target_connector.connector_id}@{target_connector.engine_version}' "
+                    f"failed to return a usable premium for all {len(connector_probe_outcomes)} probe(s) "
+                    "attempted — the candidate implementation could not be reached or evaluated."
+                )
+            else:
+                blocking_reasons.append(f"{mismatch_count} price calculation mismatches reproduced.")
         if result.blast_radius.data and float(result.blast_radius.data.absolute_financial_exposure) > 0:
             blocking_reasons.append(f"Financial exposure of ${result.blast_radius.data.absolute_financial_exposure} exceeds zero-drift tolerance.")
         if sem_diffs:
             blocking_reasons.append(f"{len(sem_diffs)} AST semantic differences identified.")
+
+        target_exec_outcome = recorder.outcome_for(MissionStage.TARGET_EXECUTION)
+        if (
+            target_connector is not None
+            and target_exec_outcome is not None
+            and target_exec_outcome.status == StageStatus.FAILED
+            and mismatch_count == 0
+        ):
+            # No probes ever reached the connector (e.g. no test scenarios
+            # were generated) — this is a target-execution failure even
+            # though the mismatch-counting loop never ran and therefore
+            # never itself produced a blocking reason.
+            blocking_reasons.append(
+                f"Target execution against connector '{target_connector.connector_id}' failed: "
+                f"{target_exec_outcome.reason}"
+            )
+
+        # A connector partial-response category failure is a data-completeness
+        # gap, not a confirmed numeric mismatch — it must never be silently
+        # absorbed into either a clean PASS or a plain mismatch-based
+        # BLOCK_DEPLOYMENT that would misrepresent it as a confirmed price
+        # disagreement. It always forces at least REVIEW_REQUIRED.
+        if connector_any_partial_response:
+            review_reasons.append(
+                f"Connector '{target_connector.connector_id}' returned one or more partial/incomplete "
+                "responses; premium comparison evidence is incomplete for at least one probe."
+            )
+            review_required = True
 
         # Never issue PASS unless the mandatory deterministic evidence for this
         # mission's mode actually exists — a Gemini outage or a skipped optional
@@ -1394,6 +1824,21 @@ class AssuranceSupervisor:
         if not self._mandatory_evidence_ok(result) and not blocking_reasons:
             blocking_reasons.append(
                 "Mandatory deterministic evidence is incomplete; a PASS decision cannot be issued."
+            )
+
+        # No mission stage may be silently missing when a decision is issued —
+        # this is the concrete enforcement of "every stage visible with a
+        # reason; incomplete evidence never produces PASS."
+        missing_stages = recorder.missing_stages()
+        # DECISION and EVIDENCE_FINALIZATION are recorded below, after this
+        # check, so they are expected to still be "missing" at this point.
+        missing_stages = [
+            s for s in missing_stages if s not in (MissionStage.DECISION, MissionStage.EVIDENCE_FINALIZATION)
+        ]
+        if missing_stages:
+            blocking_reasons.append(
+                f"{len(missing_stages)} mission stage(s) were never accounted for: "
+                f"{[s.value for s in missing_stages]}."
             )
 
         if blocking_reasons:
@@ -1430,7 +1875,16 @@ class AssuranceSupervisor:
             status=AnalysisStatus.SUCCEEDED,
             data=agent_actions,
         )
-        result.evidence_refs = evidence_ids + budget.evidence_ids
+        result.evidence_refs = evidence_ids + budget.evidence_ids + connector_evidence_ids
+
+        recorder.record(MissionStage.DECISION, StageStatus.COMPLETED)
+        still_missing = [s for s in recorder.missing_stages() if s != MissionStage.EVIDENCE_FINALIZATION]
+        recorder.record(
+            MissionStage.EVIDENCE_FINALIZATION,
+            StageStatus.COMPLETED if not still_missing else StageStatus.FAILED,
+            reason=None if not still_missing else f"Missing stages: {[s.value for s in still_missing]}",
+        )
+        result.stage_outcomes = recorder.outcomes()
 
         # Honest final ai_runtime status: only ever claims a live invocation when
         # at least one Gemini call in this mission actually succeeded.

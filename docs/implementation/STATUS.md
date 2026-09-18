@@ -99,7 +99,7 @@ Command: `cd backend && python -m pytest -q`
 
 Additional session-instructed negative coverage beyond the locked bullet list, all passing: OLE/embedded object (`test_ole_embedded_object_rejects`), password-protected/encrypted (`test_password_protected_encrypted_workbook_rejects`), oversized file (`test_oversized_file_rejects`), ZIP bomb/compression ratio (`test_zip_bomb_compression_ratio_rejects`), excessive ZIP entries (`test_excessive_zip_entry_count_rejects`), path traversal (`test_path_traversal_entry_name_rejects`), non-.xlsx extension/signature (`test_non_xlsx_extension_rejects`, `test_bad_file_signature_rejects`), missing required sheet/column (`test_missing_required_sheet_rejects`, `test_missing_required_column_rejects`), division-by-zero path (`test_division_by_zero_path_rejects`), missing rounding on an output (`test_missing_rounding_on_output_rejects`), currency inconsistency (`test_currency_inconsistency_across_outputs_rejects`), empty file (`test_empty_file_rejects`), and a "never raises" contract test (`test_never_raises_always_returns_a_receipt`).
 
-### Test results (session 2)
+## Test results (session 2)
 
 - New tests added in `backend/tests/ingestion/workbook_v1/`: 35, all passing (27 in `test_compiler.py`, 8 in `test_sanitize.py`).
 - Full-suite run before session 2's changes: 489 passed, 0 failed (session 1's final count).
@@ -185,3 +185,61 @@ Review of the D1 concern found the real user-reachable upload path, `PricingSour
 - **Auth-header mechanism is untested against the real demo target** because that target enforces no authentication today (by design, per D3) — it is proven end-to-end only against a purpose-built fake target in `tests/connectors/conftest.py::make_auth_required_app`.
 - **Idempotency claim is intentionally weak and documented as such** ("same inputs + same request_id → same outputs" for a stateless deterministic target), not a request-id-keyed response cache — see D7.
 - **Response-size cap (1 MiB) and the two locked exact timeout numbers (3s/10s) are the only "chosen constant" judgment calls in this module** — the size cap is a documented, conservative pick (see D7); the timeouts are copied verbatim from the locked doc, not chosen.
+
+## Session 4 — CP9: wiring the Controlled Workbook v1 compiler + REST connector into mission orchestration
+
+**Scope:** Wired the previously-standalone CP7 (Controlled Workbook v1 compiler) and CP8 (REST connector client) modules into the real `AssuranceSupervisor.run_mission`/`MissionExecutionService.execute_job` mission pipeline — no second mission engine — plus the minimum API/frontend surface to drive it end to end, plus the deferred CP9 stage-recorder wiring (all 20 `MissionStage` values). See `docs/implementation/DECISIONS.md` (D8) for every implementation-shape judgment call.
+
+### Files added
+
+- `backend/app/api/connectors.py` (`GET /api/v1/connectors`)
+- `backend/tests/agents/test_supervisor_connector_path.py`, `backend/tests/unit/test_connectors_api.py`, `backend/tests/unit/test_stage_recorder_wiring.py`, `backend/tests/unit/test_sources_api.py`, `backend/tests/integration/__init__.py`, `backend/tests/integration/test_workbook_to_connector_mission_e2e.py`
+
+### Files modified
+
+- `backend/app/models/mission.py` — new `ConnectorSelection` model; additive `connector_id`/`engine_version` fields on `PricingSourceRef`.
+- `backend/app/models/result_v2.py` — additive `stage_outcomes: list[StageOutcome]` field on `AssuranceResultV2`.
+- `backend/app/models/__init__.py` — exports `ConnectorSelection`.
+- `backend/app/storage/models.py` — new `EvidenceType.CONNECTOR_INVOCATION`.
+- `backend/app/services/validation_service.py` — connector-selection validation (`select_connector`) for `API_CONNECTOR` sources, fail-closed at mission-create time.
+- `backend/app/services/mission_execution_service.py` — `_resolve_source_package` returns `None` for `API_CONNECTOR`; `execute_job` builds `ConnectorSelection` and passes `target_connector=` into `run_mission`.
+- `backend/app/agents/supervisor.py` — `run_mission` gains `target_connector` parameter; new `_quote_via_connector`/`_run_probe` connector branch (real `ConnectorClient.send_quote`, `asyncio.run` bridge, per-probe `CONNECTOR_INVOCATION` evidence, hard-failure/partial-response guards); connector-path reconciliation branch; effective-period compatibility check (JSON-vs-JSON path); full `StageRecorder`/`MissionStage` wiring across every code path (clean-equivalence fast path, semantic-diff-blind-spot fast path, full material-drift path); injectable `connector_client_factory` constructor parameter for testability.
+- `backend/app/api/sources.py` — `compile_pricing_source` now returns `workbook_compilation_receipt` (the real CP7 `CompilationReceipt`) alongside the pre-existing generic receipt.
+- `backend/app/api/missions.py` — new `GET /missions/{id}/connector-evidence` endpoint (fixed-field whitelist, mirrors the existing Gemini-evidence endpoint's restraint).
+- `backend/app/main.py` — registers the new connectors router.
+- `backend/tests/agents/test_worker_delivery_outcomes.py` — updated fake `run_mission` signatures for the new `target_connector` parameter; new `test_no_duplicate_execution_under_redelivery_for_connector_backed_mission`.
+- `backend/tests/unit/test_missions_v2.py` — new connector-selection validation test cases.
+- `frontend/src/lib/api/client.ts` — `WorkbookCompilationReceipt`, `ConnectorMetadata`, `listConnectors`, `getConnectorEvidence`, `ConnectorInvocationEvidence` types/functions; `compileSource`'s return type includes `workbook_compilation_receipt`.
+- `frontend/src/lib/types/assurance.ts` — `MissionStageOutcome` type; `AssuranceResultV2.stage_outcomes`.
+- `frontend/src/app/sources/page.tsx` — `.xlsx` accepted in the Source A/B file inputs; a "RateGuard Controlled Workbook v1" supported-format card with explicit unsupported-format callouts; workbook compilation receipt rendering; a Source B "Upload File" / "Live Connector" toggle with a connector + engine-version picker (dropdown only, never a free-text URL) wired into mission creation.
+- `frontend/src/app/missions/[missionId]/page.tsx` — new "Stage Ledger" tab rendering the full 20-stage `stage_outcomes` list (status + reason per stage) and a connector-invocation-evidence panel (hashes/status only, fetched from the new endpoint).
+
+### What was verified by running code
+
+- **Locked golden case proven end-to-end through the real supervisor, real `ConnectorClient`, and real `backend/rating_engine` service** (via `httpx.ASGITransport`, no real network): canonical-v1 → $700.00 (0 mismatches, `PASS`); defective-v1 → $655.00 vs expected $700.00 (`BLOCK_DEPLOYMENT`, exact first-divergent-node and root-cause populated). `tests/agents/test_supervisor_connector_path.py` (4 tests, direct supervisor call) and `tests/integration/test_workbook_to_connector_mission_e2e.py` (3 tests, real `POST /sources` → `/compile` → `POST /missions` → real Pub/Sub push endpoint → `GET /missions/{id}`).
+- **Connector hard-failure (all probes fail) and partial-response (REVIEW_REQUIRED-category failure) never produce `PASS`** — proven by dedicated fake-client tests in `test_supervisor_connector_path.py`.
+- **Duplicate Pub/Sub delivery for a connector-backed mission still dedups correctly** — `test_no_duplicate_execution_under_redelivery_for_connector_backed_mission` confirms the supervisor (and therefore the connector call inside it) is invoked exactly once across two deliveries of the same job.
+- **Every one of the 20 locked `MissionStage` values is recorded on every real mission path exercised in tests** (clean equivalence, material-drift Release Conformance, connector-backed Release Conformance) — `test_stage_recorder_wiring.py` and the connector-path tests assert `set(stage_outcomes) == set(MISSION_STAGE_ORDER)`, and that the four genuinely-unbuilt stages (`COHORT_DISTRIBUTION`, `PIPELINE_IMPACT`, `EXPLANATION_FACTS`, `EXPLANATION_DRAFT`) are always `NOT_APPLICABLE` with an honest reason.
+- **Workbook compilation receipt is now actually returned over HTTP** — `test_sources_api.py::test_canonical_workbook_upload_surfaces_real_compilation_receipt` asserts `workbook_compilation_receipt.status == "VERIFIED"`, `compiler_version`, `artifact_sha256`, and a passing `700.00` control-case result are all present in the real `POST /sources/{id}/compile` response; a negative-fixture workbook upload returns 400 with no stack trace.
+- **`GET /api/v1/connectors` never leaks a base URL or credential** — `test_connectors_api.py` asserts on the raw response text.
+- **Full existing backend suite regression**: two pre-existing tests in `test_worker_delivery_outcomes.py` initially failed after `run_mission`'s signature changed (fake `run_mission` doubles didn't accept the new `target_connector` kwarg) — fixed by updating the fake signatures; confirmed passing afterward. Full-suite pass/fail counts below.
+- **Frontend TypeScript**: `npm run typecheck` (`tsc --noEmit`) passes with zero errors after all `sources/page.tsx`, `missions/[missionId]/page.tsx`, `lib/api/client.ts`, and `lib/types/assurance.ts` changes.
+
+### Test results (session 4)
+
+Command: `cd backend && python -m pytest -q`
+
+- New tests added this session: `test_supervisor_connector_path.py` (4), `test_connectors_api.py` (1), `test_stage_recorder_wiring.py` (2), `test_sources_api.py` (2), `test_workbook_to_connector_mission_e2e.py` (3), `test_missions_v2.py` connector-validation additions (4), `test_worker_delivery_outcomes.py` connector-duplicate-delivery addition (1) — 17 net-new test functions, all independently run and passing (per-file runs recorded during implementation).
+- Full-suite run before this session's changes: 582 passed (matches session 3's final count).
+- Two pre-existing tests in `test_worker_delivery_outcomes.py` (`test_cancelled_mission_acks`, `test_no_duplicate_execution_under_redelivery`) initially failed immediately after `run_mission`'s signature changed (their fake `run_mission` doubles did not accept the new `target_connector` keyword argument) — fixed in the same session by updating the fake signatures; the full `test_worker_delivery_outcomes.py` file (29 tests) was re-run and confirmed passing.
+- Full-suite run after this session's changes: **598 passed, 0 failed**, 1002.48s (0:16:42). Command: `cd backend && python -m pytest -q`. (582 baseline + 16 net-new test functions actually collected this session, all passing; the 2 initially-regressed tests were fixed before this run and are counted among the 598.)
+- Frontend: `npm run typecheck` (`tsc --noEmit`) — 0 errors. `npm run build`/Playwright E2E — see "Known limitations" below; no Playwright infrastructure exists in this repository, and none was added this session.
+
+### Known limitations / judgment calls a reviewer should sanity-check
+
+- **Fully automatic connector-path test generation does not always reproduce the exact locked $700.00/$655.00 figures for an arbitrary workbook** whose numeric inputs have an open-ended declared range (the shipped golden workbook's `roof_age` has `minimum=0`, no `maximum`) — the mismatch/PASS/BLOCK_DEPLOYMENT decision logic is unaffected (it is correct for whatever value is actually probed), but the literal golden dollar figures are proven by seeding the probed scenario from the workbook's own declared control case, not by a fully unattended run. See DECISIONS.md D8 for the full explanation and the concrete follow-up (seed `TEST_CANDIDATE_GENERATION` from `RG_CONTROL_CASES` inputs directly).
+- **First-divergent-node for the connector path is premium-output-granularity, not a full node-by-node trace diff** between the oracle's trace and the connector's returned trace — see D8.
+- **No browser E2E (Playwright) suite exists in this repository** — none was added this session. Backend integration coverage (real API → real Pub/Sub push endpoint → real connector over `httpx.ASGITransport`) is the actual, run, verified proof of the golden-case flows; a true browser-driven E2E suite (upload via a real browser, click through the wizard, observe the decision render) remains open follow-up work. This is flagged, not silently claimed as done.
+- **`missions/new/page.tsx` was not modified** — the connector picker and workbook upload were added to `sources/page.tsx` instead (which already had the more complete dual-source upload/compile/launch flow); `missions/new` remains the bundled-demo-sample wizard, unchanged.
+- **`POST /connectors/{id}/test` admin route remains unbuilt** (D7's own deferral, confirmed still out of scope — no requirement in this session needed it).
+- **Cross-tenant/cross-user access tests were not added** — grep found no tenant/auth-scoping concept enforced anywhere in this codebase's mission/source access paths today (single-tenant demo scope, per the locked doc's own MVP framing). This is a genuine, pre-existing gap, not something this session introduced or silently worked around.

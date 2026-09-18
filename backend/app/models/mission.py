@@ -45,6 +45,17 @@ class MissionObjective(BaseModel):
     max_portfolio_sample_size: int = 50000
 
 
+class ConnectorSelection(BaseModel):
+    """Identifies which registered connector + engine version Source B is
+    evaluated against for a connector-backed Release Conformance mission.
+    Never carries a URL or credential — those live only in the server-side
+    registry (app.connectors.registry); a mission payload can only name a
+    connector_id/engine_version pair that the administrator already
+    registered."""
+    connector_id: str
+    engine_version: str
+
+
 class PricingSourceRef(BaseModel):
     """Reference to a registered or uploaded pricing source."""
     source_id: str
@@ -57,6 +68,11 @@ class PricingSourceRef(BaseModel):
     # decision can see it: a source extracted with low confidence and
     # flagged for human review must never silently support a PASS.
     requires_human_review: bool = False
+    # Required iff source_type == "API_CONNECTOR" — validated against the
+    # server-side connector registry at mission-create time
+    # (app.connectors.registry.select_connector), never trusted as-is.
+    connector_id: str | None = None
+    engine_version: str | None = None
 
 
 class AgentAction(BaseModel):

@@ -90,6 +90,17 @@ def compile_pricing_source(source_id: str) -> dict[str, Any]:
             "output_count": len(pkg.outputs),
             "output_node_ids": [o.id for o in pkg.outputs],
         }
+        # The Controlled Workbook v1 compiler (app.ingestion.workbook_v1) computes
+        # its own, much richer CompilationReceipt (compiler_version,
+        # artifact_sha256, status, control_case_results, errors, warnings) and
+        # stores it under res.evidence["compilation_receipt"] -- surfaced here
+        # under its own key, additive to (never replacing) the generic
+        # `compilation_receipt` summary above, which every source type gets.
+        workbook_compilation_receipt = (
+            res.evidence.get("compilation_receipt")
+            if res.adapter_id == "controlled_workbook_v1_compiler"
+            else None
+        )
         return {
             "source_id": source_id,
             "adapter_id": res.adapter_id,
@@ -99,6 +110,7 @@ def compile_pricing_source(source_id: str) -> dict[str, Any]:
             "warnings": res.warnings,
             "requires_human_review": res.requires_human_review,
             "compilation_receipt": receipt,
+            "workbook_compilation_receipt": workbook_compilation_receipt,
             "ipir_package": res.ipir_package.model_dump(mode="json"),
         }
     except ValidationError as e:

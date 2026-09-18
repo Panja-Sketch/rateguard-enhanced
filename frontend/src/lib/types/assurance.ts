@@ -254,6 +254,18 @@ export interface AssuranceResultV2 {
   release_decision: SectionResult<ReleaseDecision>;
   evidence_refs: string[];
   telemetry: Record<string, unknown>;
+  stage_outcomes?: MissionStageOutcome[];
+}
+
+// The locked 20-stage mission pipeline ledger (docs/architecture/
+// RATEGUARD_LOCKED_SOURCE_OF_TRUTH.md section 7.3): every stage must be
+// visible as COMPLETED / FAILED / REVIEW_REQUIRED / NOT_APPLICABLE with a
+// reason on any non-COMPLETED outcome — never silently missing.
+export interface MissionStageOutcome {
+  stage: string;
+  status: 'COMPLETED' | 'FAILED' | 'REVIEW_REQUIRED' | 'NOT_APPLICABLE';
+  reason: string | null;
+  recorded_at: string;
 }
 
 export interface EligibleActions {

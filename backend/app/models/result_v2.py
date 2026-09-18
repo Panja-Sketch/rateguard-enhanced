@@ -14,6 +14,7 @@ from app.models.mission import (
     RuntimeExperiment,
     ValidationIssue,
 )
+from app.models.stages import StageOutcome
 
 
 class AnalysisStatus(StrEnum):
@@ -113,3 +114,9 @@ class AssuranceResultV2(BaseModel):
     )
     evidence_refs: list[str] = Field(default_factory=list)
     telemetry: dict[str, Any] = Field(default_factory=dict)
+    # The full 20-stage locked pipeline ledger (locked doc section 7.3):
+    # every MissionStage must appear exactly once, with a reason on any
+    # non-COMPLETED outcome. Empty only for missions run before this field
+    # existed or where recording failed outright (never silently omitted
+    # for a mission that completed through the current supervisor code).
+    stage_outcomes: list[StageOutcome] = Field(default_factory=list)

@@ -245,3 +245,68 @@ def test_mission_with_fee_modifier_and_exact_table_diffs_reports_full_blast_radi
     assert "effective start date" not in rationale
     assert "sequence ordering" not in rationale
 
+
+def test_mission_validation_accepts_registered_connector_selection():
+    mission = AssuranceMission(
+        mission_id="MIS-CONN-VALID-01",
+        name="Connector-Backed Mission",
+        mode=ComparisonMode.RELEASE_CONFORMANCE,
+        objective=MissionObjective(product="az_ho3", jurisdiction="Arizona", effective_period_start="2026-10-01"),
+        source_a=PricingSourceRef(source_id="WORKBOOK-1", source_type="FILE", name="Workbook"),
+        source_b=PricingSourceRef(
+            source_id="rating-engine-demo", source_type="API_CONNECTOR", name="Connector",
+            connector_id="rating-engine-demo", engine_version="canonical-v1",
+        ),
+    )
+    issues = MissionValidationService.validate_mission(mission)
+    assert issues == []
+
+
+def test_mission_validation_rejects_unregistered_connector_id():
+    mission = AssuranceMission(
+        mission_id="MIS-CONN-BAD-01",
+        name="Connector-Backed Mission",
+        mode=ComparisonMode.RELEASE_CONFORMANCE,
+        objective=MissionObjective(product="az_ho3", jurisdiction="Arizona", effective_period_start="2026-10-01"),
+        source_a=PricingSourceRef(source_id="WORKBOOK-1", source_type="FILE", name="Workbook"),
+        source_b=PricingSourceRef(
+            source_id="not-a-real-connector", source_type="API_CONNECTOR", name="Connector",
+            connector_id="not-a-real-connector", engine_version="canonical-v1",
+        ),
+    )
+    issues = MissionValidationService.validate_mission(mission)
+    assert len(issues) == 1
+    assert issues[0].field == "source_b"
+    assert issues[0].code == "CONNECTOR_NOT_REGISTERED"
+
+
+def test_mission_validation_rejects_unregistered_engine_version():
+    mission = AssuranceMission(
+        mission_id="MIS-CONN-BAD-02",
+        name="Connector-Backed Mission",
+        mode=ComparisonMode.RELEASE_CONFORMANCE,
+        objective=MissionObjective(product="az_ho3", jurisdiction="Arizona", effective_period_start="2026-10-01"),
+        source_a=PricingSourceRef(source_id="WORKBOOK-1", source_type="FILE", name="Workbook"),
+        source_b=PricingSourceRef(
+            source_id="rating-engine-demo", source_type="API_CONNECTOR", name="Connector",
+            connector_id="rating-engine-demo", engine_version="nonexistent-v9",
+        ),
+    )
+    issues = MissionValidationService.validate_mission(mission)
+    assert len(issues) == 1
+    assert issues[0].code == "CONNECTOR_ENGINE_VERSION_NOT_ALLOWED"
+
+
+def test_mission_validation_rejects_connector_source_missing_selection():
+    mission = AssuranceMission(
+        mission_id="MIS-CONN-BAD-03",
+        name="Connector-Backed Mission",
+        mode=ComparisonMode.RELEASE_CONFORMANCE,
+        objective=MissionObjective(product="az_ho3", jurisdiction="Arizona", effective_period_start="2026-10-01"),
+        source_a=PricingSourceRef(source_id="WORKBOOK-1", source_type="FILE", name="Workbook"),
+        source_b=PricingSourceRef(source_id="x", source_type="API_CONNECTOR", name="Connector"),
+    )
+    issues = MissionValidationService.validate_mission(mission)
+    assert len(issues) == 1
+    assert issues[0].code == "CONNECTOR_SELECTION_REQUIRED"
+

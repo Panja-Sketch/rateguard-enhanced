@@ -1,8 +1,18 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { ApiError, uploadSourceFile, compileSource, createAssuranceMission, describeFetchError, CompilationReceipt } from '@/lib/api/client';
+import {
+  ApiError,
+  uploadSourceFile,
+  compileSource,
+  createAssuranceMission,
+  describeFetchError,
+  CompilationReceipt,
+  WorkbookCompilationReceipt,
+  ConnectorMetadata,
+  listConnectors,
+} from '@/lib/api/client';
 import { SourceDescriptor, ValidationIssue } from '@/lib/types/assurance';
 import {
   FileCode2,
@@ -27,6 +37,7 @@ interface Compiled {
   warnings: string[];
   requires_human_review: boolean;
   compilation_receipt: CompilationReceipt;
+  workbook_compilation_receipt: WorkbookCompilationReceipt | null;
 }
 
 export default function SourcesPage() {
@@ -51,11 +62,37 @@ export default function SourcesPage() {
   // the bundled Arizona demo packages.
   const [useDemoSample, setUseDemoSample] = useState(false);
 
-  const hasRealSources = !!(compiledA?.ipir_package_id && compiledB?.ipir_package_id);
+  // Source B may instead be a registered REST connector — a dropdown
+  // selection only, never a free-text URL (locked doc section 8.2/13.2:
+  // "Users cannot provide a URL per mission").
+  const [useConnectorForB, setUseConnectorForB] = useState(false);
+  const [connectors, setConnectors] = useState<ConnectorMetadata[]>([]);
+  const [connectorId, setConnectorId] = useState<string>('');
+  const [engineVersion, setEngineVersion] = useState<string>('');
+  const [connectorsError, setConnectorsError] = useState<string | null>(null);
+
+  useEffect(() => {
+    listConnectors()
+      .then((list) => {
+        setConnectors(list);
+        if (list.length > 0) {
+          setConnectorId(list[0].connector_id);
+          setEngineVersion(list[0].allowed_engine_versions[0] || '');
+        }
+      })
+      .catch((err) => setConnectorsError(describeFetchError(err, 'Registered connectors could not be loaded.')));
+  }, []);
+
+  const selectedConnector = connectors.find((c) => c.connector_id === connectorId) || null;
+
+  const hasRealSourceA = !!compiledA?.ipir_package_id;
+  const hasRealSourceB = useConnectorForB ? !!(connectorId && engineVersion) : !!compiledB?.ipir_package_id;
+  const hasRealSources = hasRealSourceA && hasRealSourceB;
   const canExecute = hasRealSources || useDemoSample;
 
   const metadataMismatch =
     hasRealSources &&
+    !useConnectorForB &&
     compiledA &&
     compiledB &&
     (compiledA.compilation_receipt.product_line !== compiledB.compilation_receipt.product_line ||
@@ -126,7 +163,15 @@ export default function SourcesPage() {
             source_type: 'SAMPLE_RELEASE',
             name: 'Arizona HO3 Actuarial Spec (Canonical Filing Intent)',
           };
-      const sourceBRef = hasRealSources
+      const sourceBRef = useConnectorForB && hasRealSourceB
+        ? {
+            source_id: connectorId,
+            source_type: 'API_CONNECTOR',
+            name: `${selectedConnector?.display_name || connectorId} (${engineVersion})`,
+            connector_id: connectorId,
+            engine_version: engineVersion,
+          }
+        : hasRealSources
         ? {
             source_id: sourceB!.source_id,
             source_type: 'FILE',
@@ -220,6 +265,39 @@ export default function SourcesPage() {
     );
   };
 
+  const renderWorkbookReceipt = (receipt: WorkbookCompilationReceipt) => {
+    const statusColor =
+      receipt.status === 'VERIFIED'
+        ? 'text-emerald-400 border-emerald-800 bg-emerald-950/30'
+        : receipt.status === 'REVIEW_REQUIRED'
+        ? 'text-amber-300 border-amber-800 bg-amber-950/30'
+        : 'text-rose-300 border-rose-800 bg-rose-950/30';
+    return (
+      <div className={`rounded-lg border p-3 text-xs space-y-2 font-mono ${statusColor}`}>
+        <div className="font-bold font-sans">Workbook Compilation Receipt — status: {receipt.status}</div>
+        <div className="text-slate-300">Compiler version: <span className="text-white">{receipt.compiler_version}</span></div>
+        <div className="text-slate-300 break-all">SHA-256: <span className="text-white">{receipt.artifact_sha256}</span></div>
+        {receipt.control_case_results.length > 0 && (
+          <div className="text-slate-300 space-y-0.5">
+            <div>Control cases:</div>
+            {receipt.control_case_results.map((c) => (
+              <div key={c.case_id} className={c.passed ? 'text-emerald-300' : 'text-rose-300'}>
+                {c.case_id}: expected {c.expected}, actual {c.actual} — {c.passed ? 'PASS' : 'FAIL'}
+              </div>
+            ))}
+          </div>
+        )}
+        {receipt.errors.length > 0 && (
+          <div className="text-rose-300 space-y-0.5">
+            {receipt.errors.map((e, i) => (
+              <div key={i}>[{e.code}] {e.message}</div>
+            ))}
+          </div>
+        )}
+      </div>
+    );
+  };
+
   return (
     <div className="space-y-8 max-w-5xl mx-auto">
       <div>
@@ -294,6 +372,32 @@ export default function SourcesPage() {
         </div>
       </div>
 
+      {/* Supported Format: Controlled Workbook v1 */}
+      <div className="rounded-xl border border-slate-800 bg-slate-900/60 p-5 space-y-3">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2 font-bold text-white text-sm">
+            <FileCode2 className="h-4 w-4 text-emerald-400" />
+            RateGuard Controlled Workbook v1
+          </div>
+          <span className="font-mono text-[10px] text-emerald-300 rounded bg-emerald-950 px-2 py-0.5 border border-emerald-800">
+            .xlsx
+          </span>
+        </div>
+        <p className="text-xs text-slate-400 leading-relaxed">
+          A constrained, documented spreadsheet contract (fixed <code className="text-emerald-300">RG_*</code> sheet
+          names/columns, a safe calculation mini-DSL, embedded golden control cases) — never arbitrary Excel. Macro-
+          enabled files, external links, OLE objects, password-protected workbooks, and unsupported formulas are
+          rejected with the exact sheet/cell/function location, not silently ignored.
+        </p>
+        <div className="rounded-lg border border-rose-900/60 bg-rose-950/20 p-3 text-xs text-rose-200 flex items-start gap-2">
+          <AlertCircle className="h-3.5 w-3.5 shrink-0 mt-0.5" />
+          <span>
+            <span className="font-bold">Not supported:</span> legacy <code>.xls</code>, PDF, macros/VBA, arbitrary
+            Excel formulas, or any workbook outside the documented <code>RG_*</code> contract.
+          </span>
+        </div>
+      </div>
+
       {/* Dual Source Upload & Compilation Panels */}
       <div className="grid grid-cols-1 gap-6 sm:grid-cols-2">
         {/* Source A: Pricing Intent */}
@@ -308,7 +412,7 @@ export default function SourcesPage() {
           <form onSubmit={handleUploadA} className="space-y-3">
             <input
               type="file"
-              accept=".json,application/json"
+              accept=".json,application/json,.xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
               onChange={(e) => setFileA(e.target.files?.[0] || null)}
               className="block w-full text-xs text-slate-400 file:mr-3 file:py-1.5 file:px-3 file:rounded file:border-0 file:text-xs file:font-semibold file:bg-sky-950 file:text-sky-300 border border-slate-800 rounded-lg p-2 bg-slate-950"
             />
@@ -324,36 +428,98 @@ export default function SourcesPage() {
 
           {fieldIssuesA.length > 0 && renderIssues(fieldIssuesA)}
           {compiledA && renderReceipt(compiledA)}
+          {compiledA?.workbook_compilation_receipt && renderWorkbookReceipt(compiledA.workbook_compilation_receipt)}
         </div>
 
-        {/* Source B: Target Engine Implementation */}
+        {/* Source B: Target Engine Implementation, or a live connector */}
         <div className="rounded-2xl border border-purple-800/60 bg-slate-900/80 p-5 space-y-4 shadow-xl">
           <div className="flex items-center justify-between">
             <span className="rounded bg-purple-950 px-2.5 py-0.5 text-xs font-bold text-purple-300 border border-purple-800">
               Source B
             </span>
-            <span className="text-xs text-slate-400 font-mono">Implementation</span>
+            <span className="text-xs text-slate-400 font-mono">Implementation / Candidate</span>
           </div>
 
-          <form onSubmit={handleUploadB} className="space-y-3">
-            <input
-              type="file"
-              accept=".json,application/json"
-              onChange={(e) => setFileB(e.target.files?.[0] || null)}
-              className="block w-full text-xs text-slate-400 file:mr-3 file:py-1.5 file:px-3 file:rounded file:border-0 file:text-xs file:font-semibold file:bg-purple-950 file:text-purple-300 border border-slate-800 rounded-lg p-2 bg-slate-950"
-            />
+          <div className="flex rounded-lg border border-slate-800 overflow-hidden text-xs font-bold">
             <button
-              type="submit"
-              disabled={!fileB || uploadingB}
-              className="w-full inline-flex items-center justify-center gap-1.5 rounded-lg bg-purple-600 px-4 py-2 text-xs font-bold text-white hover:bg-purple-500 transition-all disabled:opacity-50"
+              type="button"
+              onClick={() => setUseConnectorForB(false)}
+              className={`flex-1 px-3 py-1.5 ${!useConnectorForB ? 'bg-purple-950 text-purple-300' : 'bg-slate-950 text-slate-500'}`}
             >
-              <Upload className="h-3.5 w-3.5" />
-              {uploadingB ? 'Compiling to IPIR...' : 'Upload & Compile Source B'}
+              Upload File
             </button>
-          </form>
+            <button
+              type="button"
+              onClick={() => setUseConnectorForB(true)}
+              className={`flex-1 px-3 py-1.5 ${useConnectorForB ? 'bg-purple-950 text-purple-300' : 'bg-slate-950 text-slate-500'}`}
+            >
+              Live Connector
+            </button>
+          </div>
 
-          {fieldIssuesB.length > 0 && renderIssues(fieldIssuesB)}
-          {compiledB && renderReceipt(compiledB)}
+          {!useConnectorForB ? (
+            <>
+              <form onSubmit={handleUploadB} className="space-y-3">
+                <input
+                  type="file"
+                  accept=".json,application/json,.xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                  onChange={(e) => setFileB(e.target.files?.[0] || null)}
+                  className="block w-full text-xs text-slate-400 file:mr-3 file:py-1.5 file:px-3 file:rounded file:border-0 file:text-xs file:font-semibold file:bg-purple-950 file:text-purple-300 border border-slate-800 rounded-lg p-2 bg-slate-950"
+                />
+                <button
+                  type="submit"
+                  disabled={!fileB || uploadingB}
+                  className="w-full inline-flex items-center justify-center gap-1.5 rounded-lg bg-purple-600 px-4 py-2 text-xs font-bold text-white hover:bg-purple-500 transition-all disabled:opacity-50"
+                >
+                  <Upload className="h-3.5 w-3.5" />
+                  {uploadingB ? 'Compiling to IPIR...' : 'Upload & Compile Source B'}
+                </button>
+              </form>
+
+              {fieldIssuesB.length > 0 && renderIssues(fieldIssuesB)}
+              {compiledB && renderReceipt(compiledB)}
+              {compiledB?.workbook_compilation_receipt && renderWorkbookReceipt(compiledB.workbook_compilation_receipt)}
+            </>
+          ) : (
+            <div className="space-y-3">
+              <p className="text-xs text-slate-400 leading-relaxed">
+                Select a registered connector and engine version. RateGuard never accepts an arbitrary URL for a
+                mission — only a connector an administrator has already registered.
+              </p>
+              {connectorsError && (
+                <div className="rounded-lg border border-rose-800 bg-rose-950/50 p-2 text-xs text-rose-300">{connectorsError}</div>
+              )}
+              <label className="block text-[11px] font-bold text-slate-400">Connector</label>
+              <select
+                value={connectorId}
+                onChange={(e) => {
+                  const next = connectors.find((c) => c.connector_id === e.target.value);
+                  setConnectorId(e.target.value);
+                  setEngineVersion(next?.allowed_engine_versions[0] || '');
+                }}
+                className="w-full rounded-lg border border-slate-800 bg-slate-950 p-2 text-xs text-white"
+              >
+                {connectors.length === 0 && <option value="">No connectors registered</option>}
+                {connectors.map((c) => (
+                  <option key={c.connector_id} value={c.connector_id}>
+                    {c.display_name}
+                  </option>
+                ))}
+              </select>
+              <label className="block text-[11px] font-bold text-slate-400">Engine version</label>
+              <select
+                value={engineVersion}
+                onChange={(e) => setEngineVersion(e.target.value)}
+                className="w-full rounded-lg border border-slate-800 bg-slate-950 p-2 text-xs text-white"
+              >
+                {(selectedConnector?.allowed_engine_versions || []).map((v) => (
+                  <option key={v} value={v}>
+                    {v}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
         </div>
       </div>
 

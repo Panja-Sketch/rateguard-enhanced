@@ -7,7 +7,7 @@ from app.api.assurance import resolve_demo_package
 from app.ipir.package import IPIRPackage
 from app.messaging.models import AssuranceJob
 from app.messaging.outcomes import ProcessingOutcome, ProcessingResult, safe_error_text
-from app.models.mission import AssuranceMission, MissionStatus, PricingSourceRef
+from app.models.mission import AssuranceMission, ConnectorSelection, MissionStatus, PricingSourceRef
 from app.services.mission_transitions import apply_transition
 from app.storage import AssuranceRunStatus, get_run_store
 from app.storage.artifacts import get_artifact_store
@@ -16,14 +16,21 @@ from app.storage.interfaces import LeaseOutcome
 logger = logging.getLogger(__name__)
 
 
-def _resolve_source_package(source_ref: PricingSourceRef) -> IPIRPackage:
+def _resolve_source_package(source_ref: PricingSourceRef) -> IPIRPackage | None:
     """Resolves a mission source to its IPIR package.
 
     Real uploaded/compiled sources (source_type == "FILE") are read back from
     the artifact store using the compiled IPIR artifact id assigned at compile
     time (see PricingSourceIngestionService.compile_source). Built-in demo/
     sample sources fall back to the bundled-file resolver.
+
+    Returns `None` (not a package) when `source_type == "API_CONNECTOR"` — a
+    connector-backed Source B has no local IPIR package at all; the caller
+    must instead build a `ConnectorSelection` and pass it to
+    `AssuranceSupervisor.run_mission` as `target_connector`.
     """
+    if source_ref.source_type == "API_CONNECTOR":
+        return None
     if source_ref.source_type == "FILE":
         content = get_artifact_store().get_artifact_content(f"IPIR-{source_ref.source_id}")
         if content:
@@ -217,10 +224,24 @@ class MissionExecutionService:
 
         try:
             left_pkg = _resolve_source_package(mission.source_a)
-            right_pkg = _resolve_source_package(mission.source_b) if mission.source_b else None
+            assert left_pkg is not None, "Source A is never a connector; validated at mission-create time."
+
+            target_connector: ConnectorSelection | None = None
+            right_pkg: IPIRPackage | None = None
+            if mission.source_b and mission.source_b.source_type == "API_CONNECTOR":
+                target_connector = ConnectorSelection(
+                    connector_id=mission.source_b.connector_id,
+                    engine_version=mission.source_b.engine_version,
+                )
+            elif mission.source_b:
+                right_pkg = _resolve_source_package(mission.source_b)
 
             supervisor = AssuranceSupervisor(store)
-            result = supervisor.run_mission(mission, left_pkg, right_pkg, cancellation_check=_cancellation_requested)
+            result = supervisor.run_mission(
+                mission, left_pkg, right_pkg,
+                target_connector=target_connector,
+                cancellation_check=_cancellation_requested,
+            )
 
             term_status = mission.status.value if hasattr(mission.status, "value") else str(mission.status)
             logger.info("MISSION_COMPLETED: Mission '%s' finished with status '%s'", mission_id, term_status)

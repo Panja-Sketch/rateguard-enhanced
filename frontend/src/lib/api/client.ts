@@ -293,6 +293,35 @@ export interface CompilationReceipt {
   output_node_ids: string[];
 }
 
+// The Controlled Workbook v1 compiler's own receipt (locked doc section 5.3):
+// only present (non-null) when the compiled source was a `.xlsx` workbook.
+// `status` distinguishes verified compilation from a workbook that compiled
+// but has incomplete/failing control-case evidence — never conflated with a
+// bare boolean pass/fail.
+export interface WorkbookControlCaseResult {
+  case_id: string;
+  passed: boolean;
+  output_id: string;
+  expected: string;
+  actual: string;
+  difference: string;
+  detail: string | null;
+}
+
+export interface WorkbookCompilationReceipt {
+  artifact_sha256: string;
+  compiler_version: string;
+  sheets_found: string[];
+  supported_constructs: string[];
+  rejected_constructs: string[];
+  node_counts: Record<string, number>;
+  control_case_results: WorkbookControlCaseResult[];
+  warnings: string[];
+  errors: { code: string; message: string; details: unknown[] }[];
+  metadata: Record<string, string>;
+  status: 'VERIFIED' | 'REVIEW_REQUIRED' | 'REJECTED';
+}
+
 export async function compileSource(sourceId: string): Promise<{
   source_id: string;
   adapter_id: string;
@@ -302,10 +331,50 @@ export async function compileSource(sourceId: string): Promise<{
   warnings: string[];
   requires_human_review: boolean;
   compilation_receipt: CompilationReceipt;
+  workbook_compilation_receipt: WorkbookCompilationReceipt | null;
   ipir_package: unknown;
 }> {
   const res = await fetch(`${BASE_URL}/api/v1/sources/${sourceId}/compile`, {
     method: 'POST',
+    cache: 'no-store',
+  });
+  return handleResponse(res);
+}
+
+// Locked doc section 13.2: safe, credential-free connector metadata only —
+// never a base URL or credential. A mission may only reference a connector
+// by this id + one of its allowed engine versions, never an arbitrary URL.
+export interface ConnectorMetadata {
+  connector_id: string;
+  display_name: string;
+  allowed_engine_versions: string[];
+  last_health_check_status: string | null;
+}
+
+export async function listConnectors(): Promise<ConnectorMetadata[]> {
+  const res = await fetch(`${BASE_URL}/api/v1/connectors`, { cache: 'no-store' });
+  return handleResponse<ConnectorMetadata[]>(res);
+}
+
+export interface ConnectorInvocationEvidence {
+  evidence_id: string;
+  connector_id: string | null;
+  engine_version: string | null;
+  correlation_id: string | null;
+  connector_request_id: string | null;
+  request_sha256: string | null;
+  response_sha256: string | null;
+  status: string | null;
+  final_premium: string | null;
+  error_code: string | null;
+}
+
+export async function getConnectorEvidence(missionId: string): Promise<{
+  mission_id: string;
+  connector_invocation_count: number;
+  connector_invocations: ConnectorInvocationEvidence[];
+}> {
+  const res = await fetch(`${BASE_URL}/api/v1/missions/${missionId}/connector-evidence`, {
     cache: 'no-store',
   });
   return handleResponse(res);

@@ -7,10 +7,12 @@ import {
   getAssuranceMission,
   getAssuranceRunEvents,
   getAssuranceRunEvidence,
+  getConnectorEvidence,
   cancelAssuranceMission,
   retryAssuranceMission,
   generateAlignmentOptions,
   AlignmentOptionsResult,
+  ConnectorInvocationEvidence,
   ApiError,
 } from '@/lib/api/client';
 import { AssuranceMissionDetail, AssuranceResultV2, EvidenceRecord, WorkflowEvent } from '@/lib/types/assurance';
@@ -95,8 +97,9 @@ export default function MissionDetailPage() {
   }, [missionId]);
 
   const [activeTab, setActiveTab] = useState<
-    'summary' | 'semantic' | 'impact' | 'experiments' | 'recon' | 'blast' | 'remediation' | 'evidence' | 'agent'
+    'summary' | 'semantic' | 'impact' | 'experiments' | 'recon' | 'blast' | 'remediation' | 'evidence' | 'agent' | 'stages'
   >('summary');
+  const [connectorEvidence, setConnectorEvidence] = useState<ConnectorInvocationEvidence[]>([]);
 
   const pollTimerRef = useRef<NodeJS.Timeout | null>(null);
 
@@ -123,6 +126,12 @@ export default function MissionDetailPage() {
             setEvidence(evidenceRes.evidence || []);
           } catch {
             // Non-fatal: the Evidence Lineage tab falls back to its empty state.
+          }
+          try {
+            const connectorEvidenceRes = await getConnectorEvidence(missionId);
+            setConnectorEvidence(connectorEvidenceRes.connector_invocations || []);
+          } catch {
+            // Non-fatal: only present for connector-backed missions.
           }
           return;
         } catch (err) {
@@ -532,6 +541,7 @@ export default function MissionDetailPage() {
               { id: 'blast', label: 'Blast Radius & Telemetry', icon: BarChart3 },
               { id: 'remediation', label: isEquivalence ? 'Alignment Options' : 'Remediation & Revalidation', icon: Check },
               { id: 'evidence', label: 'Evidence Lineage', icon: Database },
+              { id: 'stages', label: 'Stage Ledger', icon: Layers },
               { id: 'agent', label: 'Gemini Action Timeline', icon: Bot },
             ].map((tab) => {
               const Icon = tab.icon;
@@ -840,6 +850,56 @@ export default function MissionDetailPage() {
           {/* Tab 8: Evidence Lineage */}
           {activeTab === 'evidence' && (
             <EvidenceLineage evidence={evidence} isCompleted={true} />
+          )}
+
+          {/* Full 20-stage locked pipeline ledger (locked doc section 7.3):
+              every stage visible as COMPLETED/FAILED/REVIEW_REQUIRED/
+              NOT_APPLICABLE with a reason — never silently missing. */}
+          {activeTab === 'stages' && (
+            <div className="space-y-3">
+              {(!result?.stage_outcomes || result.stage_outcomes.length === 0) && (
+                <div className="rounded-xl border border-slate-800 bg-slate-900/50 p-8 text-center text-xs text-slate-400 font-mono">
+                  No stage ledger recorded for this mission (missions run before this ledger existed, or the mission
+                  has not yet reached a terminal state).
+                </div>
+              )}
+              {result?.stage_outcomes?.map((o) => {
+                const color =
+                  o.status === 'COMPLETED'
+                    ? 'border-emerald-800 bg-emerald-950/20 text-emerald-300'
+                    : o.status === 'NOT_APPLICABLE'
+                    ? 'border-slate-800 bg-slate-950 text-slate-400'
+                    : o.status === 'REVIEW_REQUIRED'
+                    ? 'border-amber-800 bg-amber-950/20 text-amber-300'
+                    : 'border-rose-800 bg-rose-950/20 text-rose-300';
+                return (
+                  <div key={o.stage} className={`rounded-lg border p-3 flex items-start justify-between gap-4 ${color}`}>
+                    <div>
+                      <div className="font-mono text-xs font-bold">{o.stage}</div>
+                      {o.reason && <div className="text-[11px] mt-0.5 opacity-90">{o.reason}</div>}
+                    </div>
+                    <span className="font-mono text-[10px] font-bold shrink-0 uppercase">{o.status}</span>
+                  </div>
+                );
+              })}
+
+              {connectorEvidence.length > 0 && (
+                <div className="pt-4 space-y-2">
+                  <div className="text-xs font-bold text-white flex items-center gap-1.5">
+                    <Database className="h-3.5 w-3.5 text-sky-400" /> Connector Invocation Evidence
+                  </div>
+                  {connectorEvidence.map((ev) => (
+                    <div key={ev.evidence_id} className="rounded-lg border border-slate-800 bg-slate-950 p-3 text-[11px] font-mono text-slate-300 space-y-0.5">
+                      <div>Connector: <span className="text-sky-300">{ev.connector_id}@{ev.engine_version}</span> — status: <span className="text-white">{ev.status}</span></div>
+                      {ev.final_premium && <div>Final premium: <span className="text-white">{ev.final_premium}</span></div>}
+                      <div className="break-all">Request SHA-256: {ev.request_sha256 || 'n/a'}</div>
+                      <div className="break-all">Response SHA-256: {ev.response_sha256 || 'n/a'}</div>
+                      {ev.error_code && <div className="text-rose-300">Error: {ev.error_code}</div>}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
           )}
 
           {/* Tab 9: Agent Action Timeline */}

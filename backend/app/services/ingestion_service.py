@@ -1,10 +1,15 @@
 import hashlib
 import uuid
+from decimal import Decimal
 from typing import Any
 
 from app.adapters import AdapterResult, SourceDescriptor, SourceFormat
 from app.adapters.errors import SourceParsingError
 from app.agents.supervisor import AssuranceSupervisor
+from app.ipir.enums import ProvenanceSourceType
+from app.ipir.provenance import Provenance, SourceReference
+from app.ipir.v0_2.compat import lower_to_v0_1
+from app.ingestion.workbook_v1.compiler import compile_workbook
 from app.storage import get_run_store
 from app.storage.artifacts import ArtifactCategory, ArtifactDescriptor, get_artifact_store
 
@@ -16,7 +21,11 @@ class PricingSourceIngestionService:
     rather than calling an adapter directly, so every source — regardless of
     whether a mission exists yet — goes through the same mandatory hash/
     provenance capture, extractor-selection (deterministic-first, Gemini only
-    for genuinely ambiguous PDF/Excel sources), and IPIR schema validation.
+    for genuinely ambiguous PDF sources), and IPIR schema validation.
+    Controlled Workbook v1 ('.xlsx') sources are compiled separately, by the
+    fully deterministic `app.ingestion.workbook_v1` compiler (see
+    `_compile_controlled_workbook` below) rather than the Gemini-assisted
+    pipeline.
     """
 
     def __init__(self) -> None:
@@ -38,25 +47,36 @@ class PricingSourceIngestionService:
         if ext == "json":
             fmt = SourceFormat.STRUCTURED_JSON
             cat = ArtifactCategory.SOURCE_JSON
-        elif ext in ("xlsx", "xls", "pdf"):
-            # Excel and PDF extraction is not implemented: the adapters for
-            # these formats parse (or, for PDF, don't even parse) the
-            # uploaded bytes and then discard them, substituting the bundled
-            # canonical demo IPIR package regardless of actual content. That
-            # is fabrication, not extraction -- a pricing-assurance tool must
-            # fail closed rather than silently misrepresent an unverified
-            # extraction as a genuine compilation. Rejected here until real,
-            # content-faithful extraction exists and is proven end-to-end.
+        elif ext == "xlsx":
+            # Routed to the Controlled RateGuard Workbook v1 compiler
+            # (`app.ingestion.workbook_v1`) in `compile_source` below, which
+            # performs full ZIP/XML safety inspection, sheet/formula
+            # validation, and control-case execution before any IPIR package
+            # is trusted. This is a genuinely constrained, verified contract
+            # -- not arbitrary Excel interpretation.
+            fmt = SourceFormat.EXCEL
+            cat = ArtifactCategory.SOURCE_WORKBOOK
+        elif ext in ("xls", "pdf"):
+            # Legacy binary Excel (.xls) and PDF extraction are not
+            # implemented: the legacy adapters for these formats parse (or,
+            # for PDF, don't even parse) the uploaded bytes and then discard
+            # them, substituting the bundled canonical demo IPIR package
+            # regardless of actual content. That is fabrication, not
+            # extraction -- a pricing-assurance tool must fail closed rather
+            # than silently misrepresent an unverified extraction as a
+            # genuine compilation. Rejected here until real, content-faithful
+            # extraction exists and is proven end-to-end.
             raise SourceParsingError(
                 f"'.{ext}' sources are not yet supported for verified extraction. "
-                "RateGuard only compiles native IPIR/structured JSON sources today "
-                "(see the sample template on the Sources page) -- Excel and PDF "
-                "support will be enabled once content-faithful extraction is "
-                "implemented and proven, not before."
+                "RateGuard compiles native IPIR/structured JSON and the Controlled "
+                "RateGuard Workbook v1 '.xlsx' contract today (see the sample "
+                "template on the Sources page) -- legacy '.xls' and PDF support "
+                "will be enabled once content-faithful extraction is implemented "
+                "and proven, not before."
             )
         else:
             raise SourceParsingError(
-                f"Unsupported file extension '.{ext}'. Allowed: .json"
+                f"Unsupported file extension '.{ext}'. Allowed: .json, .xlsx"
             )
 
         source_id = f"SRC-{uuid.uuid4().hex[:8].upper()}"
@@ -93,7 +113,15 @@ class PricingSourceIngestionService:
                 f"Artifact content for source '{source_descriptor.source_id}' not found."
             )
 
-        result = self.supervisor.extract_and_compile_source(source_descriptor, content)
+        if source_descriptor.source_type == SourceFormat.EXCEL:
+            # Controlled RateGuard Workbook v1: a fully deterministic,
+            # security-inspected compiler (`app.ingestion.workbook_v1`), not
+            # the legacy Gemini-assisted extraction-strategy pipeline used
+            # for genuinely ambiguous PDF sources. Never falls through to
+            # the fabricating legacy `ExcelPricingAdapter`.
+            result = _compile_controlled_workbook(source_descriptor, content)
+        else:
+            result = self.supervisor.extract_and_compile_source(source_descriptor, content)
 
         # A package's `id` is declared by whatever the uploaded source itself
         # says it is (e.g. copy-pasted from a shared template) -- nothing
@@ -120,3 +148,64 @@ class PricingSourceIngestionService:
         self.artifact_store.save_artifact(ipir_art, ipir_json)
 
         return result
+
+
+def _compile_controlled_workbook(source: SourceDescriptor, content: bytes) -> AdapterResult:
+    """Compiles a Controlled RateGuard Workbook v1 ('.xlsx') source via the
+    fully deterministic `app.ingestion.workbook_v1.compile_workbook`
+    pipeline (ZIP/XML safety inspection, sheet/formula validation, IPIR v0.2
+    construction, and control-case execution against the existing oracle),
+    then lowers the result to a v0.1 `IPIRPackage` so it fits the same
+    `AdapterResult` contract every other source format returns.
+
+    A `REJECTED` receipt (any security/structural violation) raises
+    `SourceParsingError` immediately -- it never reaches the caller as a
+    package. A `REVIEW_REQUIRED` receipt (e.g. missing/failing control
+    cases, an ambiguous mapping) still returns an `AdapterResult`, but with
+    reduced confidence and `requires_human_review=True`, so it can never be
+    mistaken for a verified compilation downstream.
+    """
+    receipt = compile_workbook(content, source.name)
+
+    if receipt.status == "REJECTED":
+        reasons = "; ".join(f"{err.code}: {err.message}" for err in receipt.errors) or "unknown reason"
+        raise SourceParsingError(
+            f"Controlled Workbook v1 compilation rejected for '{source.name}': {reasons}"
+        )
+
+    assert receipt.package is not None  # guaranteed whenever status != REJECTED
+    ipir_package = lower_to_v0_1(receipt.package)
+
+    provenance = Provenance(
+        sources=[
+            SourceReference(
+                source_type=ProvenanceSourceType.ACTUARIAL_WORKBOOK,
+                source_id=source.source_id,
+                source_name=source.name,
+                section=f"Sheets: {', '.join(receipt.sheets_found)}",
+                location=f"artifact_sha256={receipt.artifact_sha256}",
+            )
+        ],
+        extraction_confidence=Decimal("1") if receipt.status == "VERIFIED" else Decimal("0.5"),
+        interpretation_confidence=Decimal("1") if receipt.status == "VERIFIED" else Decimal("0.5"),
+        notes=(
+            f"Compiled via Controlled RateGuard Workbook v1 compiler "
+            f"({receipt.compiler_version}); status={receipt.status}."
+        ),
+    )
+
+    return AdapterResult(
+        source_id=source.source_id,
+        source_type=SourceFormat.EXCEL,
+        adapter_id="controlled_workbook_v1_compiler",
+        ipir_package=ipir_package,
+        mapping_coverage=100.0 if receipt.status == "VERIFIED" else 50.0,
+        warnings=list(receipt.warnings),
+        unsupported_constructs=list(receipt.rejected_constructs),
+        confidence=1.0 if receipt.status == "VERIFIED" else 0.4,
+        evidence={
+            "compilation_receipt": receipt.model_dump(mode="json", exclude={"package"}),
+        },
+        provenance=provenance,
+        requires_human_review=receipt.status != "VERIFIED",
+    )

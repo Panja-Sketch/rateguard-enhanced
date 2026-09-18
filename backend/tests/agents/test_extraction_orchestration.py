@@ -269,20 +269,23 @@ def test_ingestion_service_end_to_end_registers_hash_and_compiles_via_supervisor
     assert result.evidence["source_sha256"] == descriptor.metadata["sha256"]
 
 
-def test_ingestion_service_rejects_excel_and_pdf_uploads():
-    """Excel/PDF extraction is not implemented -- the adapters parse (or,
-    for PDF, don't even parse) the uploaded bytes and then silently
-    substitute the bundled canonical demo IPIR package regardless of actual
-    content. Until real, content-faithful extraction exists and is proven,
-    the ingestion boundary must fail closed rather than accept these
-    formats and misrepresent a fabricated compilation as genuine."""
+def test_ingestion_service_rejects_legacy_xls_and_pdf_uploads():
+    """Legacy binary Excel (.xls) and PDF extraction are not implemented --
+    the legacy adapters for these formats parse (or, for PDF, don't even
+    parse) the uploaded bytes and then silently substitute the bundled
+    canonical demo IPIR package regardless of actual content. Until real,
+    content-faithful extraction exists and is proven, the ingestion boundary
+    must fail closed rather than accept these formats and misrepresent a
+    fabricated compilation as genuine. '.xlsx' is excluded from this check
+    because it is now handled by the real Controlled Workbook v1 compiler --
+    see test_ingestion_service_rejects_unsafe_xlsx_workbook below."""
     from app.adapters.errors import SourceParsingError
     from app.services.ingestion_service import PricingSourceIngestionService
 
     service = PricingSourceIngestionService()
 
     for filename, content_type in [
-        ("rate_spec.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
+        ("rate_spec.xls", "application/vnd.ms-excel"),
         ("filing.pdf", "application/pdf"),
     ]:
         try:
@@ -290,6 +293,57 @@ def test_ingestion_service_rejects_excel_and_pdf_uploads():
             raise AssertionError(f"Expected SourceParsingError for {filename}")
         except SourceParsingError as e:
             assert "not yet supported" in str(e)
+
+
+def test_ingestion_service_rejects_unsafe_xlsx_workbook():
+    """'.xlsx' uploads are now routed to the real Controlled Workbook v1
+    compiler (`app.ingestion.workbook_v1`), not the legacy fabricating
+    adapter. Garbage bytes are not a valid ZIP/XLSX archive at all, so the
+    compiler's own ZIP-safety stage rejects it deterministically, and
+    `compile_source` must surface that as a `SourceParsingError` rather than
+    ever returning a fabricated package."""
+    from app.adapters.errors import SourceParsingError
+    from app.services.ingestion_service import PricingSourceIngestionService
+
+    service = PricingSourceIngestionService()
+    descriptor = service.register_source(
+        filename="rate_spec.xlsx",
+        content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        content=b"not a real xlsx file",
+    )
+    try:
+        service.compile_source(descriptor)
+        raise AssertionError("Expected SourceParsingError for an invalid .xlsx archive")
+    except SourceParsingError as e:
+        assert "rejected" in str(e).lower()
+
+
+def test_ingestion_service_compiles_canonical_workbook_v1_sample_end_to_end():
+    """The generated canonical Controlled Workbook v1 sample (proving the
+    $700.00 golden case) must compile end to end through the real ingestion
+    boundary -- register_source -> compile_source -- exactly as a real
+    upload would, using the deterministic workbook compiler rather than the
+    legacy Gemini-assisted pipeline."""
+    from app.services.ingestion_service import PricingSourceIngestionService
+
+    workbook_path = (
+        _DATA_DIR / "samples" / "workbook_v1" / "canonical" / "AZ_HO3_GOLDEN_workbook.xlsx"
+    )
+    content = workbook_path.read_bytes()
+
+    service = PricingSourceIngestionService()
+    descriptor = service.register_source(
+        filename="AZ_HO3_GOLDEN_workbook.xlsx",
+        content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        content=content,
+    )
+    assert descriptor.source_type == SourceFormat.EXCEL
+
+    result = service.compile_source(descriptor)
+    assert result.adapter_id == "controlled_workbook_v1_compiler"
+    assert result.confidence == 1.0
+    assert not result.requires_human_review
+    assert result.evidence["compilation_receipt"]["status"] == "VERIFIED"
 
 
 def test_ingestion_service_namespaces_package_id_to_source_id():

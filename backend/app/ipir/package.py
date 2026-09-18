@@ -17,6 +17,8 @@ from app.ipir.tables import RateTable
 class PricingConstant(BaseModel):
     """Named constant value used within rate calculation ASTs."""
 
+    model_config = ConfigDict(extra="forbid")
+
     id: str
     name: str
     value: Decimal

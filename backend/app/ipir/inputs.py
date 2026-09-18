@@ -1,6 +1,6 @@
 from decimal import Decimal
 
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, ConfigDict, model_validator
 
 from app.ipir.common import validate_identifier_string
 from app.ipir.enums import InputDataType
@@ -9,6 +9,8 @@ from app.ipir.provenance import Provenance
 
 class PricingInput(BaseModel):
     """Definition of a risk factor or policy input variable required for rating."""
+
+    model_config = ConfigDict(extra="forbid")
 
     id: str
     name: str

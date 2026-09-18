@@ -1,0 +1,196 @@
+{
+  "attestation": null,
+  "calculations": [
+    {
+      "depends_on": [],
+      "description": null,
+      "effective_period": null,
+      "expression": {
+        "kind": "TABLE_LOOKUP",
+        "table_id": "roof_age_factor_table"
+      },
+      "id": "rate_factor",
+      "name": "Resolved roof-age rate factor"
+    },
+    {
+      "depends_on": [
+        "base_rate",
+        "rate_factor"
+      ],
+      "description": null,
+      "effective_period": null,
+      "expression": {
+        "kind": "BINARY",
+        "left": {
+          "kind": "REFERENCE",
+          "ref": "base_rate"
+        },
+        "on_zero_behavior": "REJECT",
+        "operator": "MULTIPLY",
+        "right": {
+          "kind": "REFERENCE",
+          "ref": "rate_factor"
+        }
+      },
+      "id": "raw_premium",
+      "name": "Base rate x roof-age factor"
+    },
+    {
+      "depends_on": [
+        "raw_premium"
+      ],
+      "description": null,
+      "effective_period": null,
+      "expression": {
+        "kind": "ROUND",
+        "operand": {
+          "kind": "REFERENCE",
+          "ref": "raw_premium"
+        },
+        "rounding_mode": "HALF_UP",
+        "scale": 2
+      },
+      "id": "final_premium",
+      "name": "Rounded final premium"
+    }
+  ],
+  "constants": [
+    {
+      "description": null,
+      "effective_period": null,
+      "id": "base_rate",
+      "name": "Base Rate",
+      "provenance": null,
+      "value": "500.00"
+    }
+  ],
+  "control_cases": [
+    {
+      "case_id": "golden_case",
+      "expected_outputs": {
+        "final_premium_output": "700.00"
+      },
+      "inputs": {
+        "dwelling_limit": "300000.00",
+        "roof_age": 25
+      },
+      "tolerance": "0.00"
+    }
+  ],
+  "effective_period": {
+    "end": null,
+    "start": "2026-10-01"
+  },
+  "inputs": [
+    {
+      "allowed_values": null,
+      "data_type": "INTEGER",
+      "description": null,
+      "id": "roof_age",
+      "maximum": null,
+      "minimum": null,
+      "name": "Roof Age (years)",
+      "provenance": null,
+      "required": true,
+      "unit": null
+    },
+    {
+      "allowed_values": null,
+      "data_type": "MONEY",
+      "description": null,
+      "id": "dwelling_limit",
+      "maximum": null,
+      "minimum": null,
+      "name": "Dwelling Coverage Limit",
+      "provenance": null,
+      "required": true,
+      "unit": null
+    }
+  ],
+  "outputs": [
+    {
+      "currency": "USD",
+      "id": "final_premium_output",
+      "name": "Total Policy Premium",
+      "rounding_mode": "HALF_UP",
+      "scale": 2,
+      "source_ref": "final_premium"
+    }
+  ],
+  "package_id": "az_ho3_golden",
+  "package_version": "1.0.0",
+  "product": {
+    "currency": "USD",
+    "jurisdiction": {
+      "country": "US",
+      "state_or_province": "AZ"
+    },
+    "line": "HOMEOWNERS",
+    "product_id": "az_ho3"
+  },
+  "schema_version": "0.2.0",
+  "source": {
+    "artifact_sha256": "8450a931ecddc7fd68365b46266c2e96ecea2fa118e42cf5338a0942779fb430",
+    "compiled_at": "2026-09-17T00:00:00Z",
+    "compiler_version": "rateguard-ipir-v0_2-golden-fixture-generator/1.0.0",
+    "source_type": "STRUCTURED_JSON"
+  },
+  "tables": [
+    {
+      "default_value": null,
+      "dimensions": [
+        {
+          "input_ref": "roof_age",
+          "lookup_type": "RANGE"
+        }
+      ],
+      "effective_period": null,
+      "id": "roof_age_factor_table",
+      "name": "Roof Age Rate Factor",
+      "provenance": null,
+      "requires_total_coverage": false,
+      "rows": [
+        {
+          "matches": [
+            {
+              "include_maximum": true,
+              "include_minimum": true,
+              "maximum": 10,
+              "minimum": 0
+            }
+          ],
+          "priority": null,
+          "value": "1.00"
+        },
+        {
+          "matches": [
+            {
+              "include_maximum": true,
+              "include_minimum": true,
+              "maximum": 20,
+              "minimum": 11
+            }
+          ],
+          "priority": null,
+          "value": "1.20"
+        },
+        {
+          "matches": [
+            {
+              "include_maximum": true,
+              "include_minimum": true,
+              "maximum": null,
+              "minimum": 21
+            }
+          ],
+          "priority": null,
+          "value": "1.40"
+        }
+      ]
+    }
+  ],
+  "transaction_types": [
+    "NEW_BUSINESS",
+    "RENEWAL"
+  ]
+}

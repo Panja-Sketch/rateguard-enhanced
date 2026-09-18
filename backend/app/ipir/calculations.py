@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.ipir.common import EffectivePeriod, LiteralValue, NodeReference, validate_identifier_string
 from app.ipir.constraints import RoundingRule
@@ -8,6 +8,8 @@ from app.ipir.provenance import Provenance
 
 class CalculationNode(BaseModel):
     """Execution step node representing an intermediate calculation or rate factor application."""
+
+    model_config = ConfigDict(extra="forbid")
 
     id: str
     name: str

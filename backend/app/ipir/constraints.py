@@ -1,6 +1,6 @@
 from decimal import Decimal
 
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, ConfigDict, model_validator
 
 from app.ipir.common import EffectivePeriod, validate_identifier_string
 from app.ipir.enums import ConstraintType, RoundingMode
@@ -9,6 +9,8 @@ from app.ipir.provenance import Provenance
 
 class RoundingRule(BaseModel):
     """Specification of rounding direction and decimal precision for calculation steps."""
+
+    model_config = ConfigDict(extra="forbid")
 
     id: str
     precision: int
@@ -26,6 +28,8 @@ class RoundingRule(BaseModel):
 
 class PremiumConstraint(BaseModel):
     """Specification of minimum or maximum premium bounds."""
+
+    model_config = ConfigDict(extra="forbid")
 
     id: str
     name: str
@@ -45,6 +49,8 @@ class PremiumConstraint(BaseModel):
 
 class PricingFee(BaseModel):
     """Specification of fixed policy or transaction fees."""
+
+    model_config = ConfigDict(extra="forbid")
 
     id: str
     name: str

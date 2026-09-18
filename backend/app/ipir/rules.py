@@ -1,4 +1,4 @@
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, ConfigDict, model_validator
 
 from app.ipir.common import EffectivePeriod, LiteralValue, NodeReference, validate_identifier_string
 from app.ipir.enums import ComparisonOperator, LogicalOperator
@@ -9,6 +9,8 @@ from app.ipir.provenance import Provenance
 class ComparisonCondition(BaseModel):
     """Relational comparison condition between references, literals, or expressions."""
 
+    model_config = ConfigDict(extra="forbid")
+
     left: NodeReference | LiteralValue | Expression
     operator: ComparisonOperator
     right: NodeReference | LiteralValue | Expression
@@ -16,6 +18,8 @@ class ComparisonCondition(BaseModel):
 
 class LogicalCondition(BaseModel):
     """Logical combination (AND/OR) of boolean conditions."""
+
+    model_config = ConfigDict(extra="forbid")
 
     operator: LogicalOperator
     conditions: list["ComparisonCondition | LogicalCondition"]
@@ -34,6 +38,8 @@ Condition = ComparisonCondition | LogicalCondition
 
 class PricingRule(BaseModel):
     """Declarative conditional pricing rule (IF condition THEN value ELSE value)."""
+
+    model_config = ConfigDict(extra="forbid")
 
     id: str
     name: str

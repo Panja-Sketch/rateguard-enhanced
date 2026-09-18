@@ -1,12 +1,14 @@
 from decimal import Decimal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.ipir.enums import ProvenanceSourceType
 
 
 class SourceReference(BaseModel):
     """Reference to an origin document, workbook, or system entry."""
+
+    model_config = ConfigDict(extra="forbid")
 
     source_type: ProvenanceSourceType
     source_id: str
@@ -20,6 +22,8 @@ class SourceReference(BaseModel):
 
 class Provenance(BaseModel):
     """Lineage and audit metadata for IPIR pricing nodes."""
+
+    model_config = ConfigDict(extra="forbid")
 
     sources: list[SourceReference] = Field(default_factory=list)
     extraction_confidence: Decimal | None = None

@@ -1,4 +1,4 @@
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, ConfigDict, model_validator
 
 from app.ipir.common import LiteralValue, NodeReference
 from app.ipir.enums import ExpressionOperator
@@ -6,6 +6,8 @@ from app.ipir.enums import ExpressionOperator
 
 class Expression(BaseModel):
     """Declarative AST node for mathematical calculations."""
+
+    model_config = ConfigDict(extra="forbid")
 
     operator: ExpressionOperator
     operands: list["Expression | NodeReference | LiteralValue"]

@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.ipir.common import validate_identifier_string
 from app.ipir.enums import InsuranceLine
@@ -7,12 +7,16 @@ from app.ipir.enums import InsuranceLine
 class Jurisdiction(BaseModel):
     """Geographic scope definition for insurance products and filings."""
 
+    model_config = ConfigDict(extra="forbid")
+
     country: str = "US"
     state_or_province: str | None = None
 
 
 class InsuranceProduct(BaseModel):
     """Specification of an insurance product line and jurisdiction context."""
+
+    model_config = ConfigDict(extra="forbid")
 
     id: str
     name: str
@@ -28,6 +32,8 @@ class InsuranceProduct(BaseModel):
 
 class CoverageDefinition(BaseModel):
     """Association of calculation nodes with coverage-level premiums."""
+
+    model_config = ConfigDict(extra="forbid")
 
     id: str
     name: str
@@ -45,6 +51,8 @@ class CoverageDefinition(BaseModel):
 
 class PricingOutput(BaseModel):
     """Declaration of target output premium fields (e.g. total_policy_premium)."""
+
+    model_config = ConfigDict(extra="forbid")
 
     id: str
     name: str

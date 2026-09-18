@@ -1,6 +1,6 @@
 from decimal import Decimal
 
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, ConfigDict, model_validator
 
 from app.ipir.common import EffectivePeriod, NodeReference, validate_identifier_string
 from app.ipir.enums import ModifierType
@@ -10,6 +10,8 @@ from app.ipir.rules import ComparisonCondition, LogicalCondition
 
 class PricingModifier(BaseModel):
     """Specification of discounts, surcharges, or credits applied to rating steps."""
+
+    model_config = ConfigDict(extra="forbid")
 
     id: str
     name: str

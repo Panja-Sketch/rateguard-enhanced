@@ -3,7 +3,7 @@ from datetime import date
 from decimal import Decimal
 from typing import Any
 
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, ConfigDict, model_validator
 
 ID_PATTERN = re.compile(r"^[a-zA-Z0-9_.-]+$")
 
@@ -24,6 +24,8 @@ def validate_identifier_string(v: str) -> str:
 class EffectivePeriod(BaseModel):
     """Represents a date-range period for rate versioning and temporal evaluation."""
 
+    model_config = ConfigDict(extra="forbid")
+
     start: date
     end: date | None = None
 
@@ -37,6 +39,8 @@ class EffectivePeriod(BaseModel):
 class NodeReference(BaseModel):
     """Explicit reference to another IPIR node or variable by identifier."""
 
+    model_config = ConfigDict(extra="forbid")
+
     ref: str
 
     @model_validator(mode="after")
@@ -47,6 +51,8 @@ class NodeReference(BaseModel):
 
 class LiteralValue(BaseModel):
     """Typed literal value (Decimal, integer, string, or boolean) for expressions and conditions."""
+
+    model_config = ConfigDict(extra="forbid")
 
     value: Decimal | int | str | bool
 

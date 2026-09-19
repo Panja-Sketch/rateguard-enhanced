@@ -4,19 +4,20 @@ from pydantic import ValidationError
 
 from app.agents.supervisor import AssuranceSupervisor
 from app.api.assurance import resolve_demo_package
+from app.auth.tenancy import effective_tenant
 from app.ipir.package import IPIRPackage
 from app.messaging.models import AssuranceJob
 from app.messaging.outcomes import ProcessingOutcome, ProcessingResult, safe_error_text
 from app.models.mission import AssuranceMission, ConnectorSelection, MissionStatus, PricingSourceRef
 from app.services.mission_transitions import apply_transition
 from app.storage import AssuranceRunStatus, get_run_store
-from app.storage.artifacts import get_artifact_store
+from app.storage.artifacts import ArtifactKey, get_artifact_store
 from app.storage.interfaces import LeaseOutcome
 
 logger = logging.getLogger(__name__)
 
 
-def _resolve_source_package(source_ref: PricingSourceRef) -> IPIRPackage | None:
+def _resolve_source_package(source_ref: PricingSourceRef, tenant_id: str | None = None) -> IPIRPackage | None:
     """Resolves a mission source to its IPIR package.
 
     Real uploaded/compiled sources (source_type == "FILE") are read back from
@@ -32,7 +33,14 @@ def _resolve_source_package(source_ref: PricingSourceRef) -> IPIRPackage | None:
     if source_ref.source_type == "API_CONNECTOR":
         return None
     if source_ref.source_type == "FILE":
-        content = get_artifact_store().get_artifact_content(f"IPIR-{source_ref.source_id}")
+        # Compiled IPIR is read only from the mission's own tenant prefix; a
+        # source id from another tenant (or without a resolvable tenant) is
+        # simply not found and never falls through to another tenant's data.
+        if not tenant_id:
+            raise ValueError("A tenant is required to resolve an uploaded source.")
+        content = get_artifact_store().get_artifact_content(
+            ArtifactKey(tenant_id, "sources", source_ref.source_id, "compiled", f"IPIR-{source_ref.source_id}")
+        )
         if content:
             return IPIRPackage.model_validate_json(content)
     return resolve_demo_package(source_ref.source_id)
@@ -222,8 +230,9 @@ class MissionExecutionService:
             current_meta = current.metadata if isinstance(current.metadata, dict) else {}
             return bool(current.cancellation_requested or current_meta.get("cancellation_requested"))
 
+        mission_tenant = effective_tenant(getattr(record, "tenant_id", None))
         try:
-            left_pkg = _resolve_source_package(mission.source_a)
+            left_pkg = _resolve_source_package(mission.source_a, mission_tenant)
             assert left_pkg is not None, "Source A is never a connector; validated at mission-create time."
 
             target_connector: ConnectorSelection | None = None
@@ -234,7 +243,7 @@ class MissionExecutionService:
                     engine_version=mission.source_b.engine_version,
                 )
             elif mission.source_b:
-                right_pkg = _resolve_source_package(mission.source_b)
+                right_pkg = _resolve_source_package(mission.source_b, mission_tenant)
 
             supervisor = AssuranceSupervisor(store)
             result = supervisor.run_mission(

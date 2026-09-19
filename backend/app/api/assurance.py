@@ -1,7 +1,9 @@
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status
 
+from app.auth import AuthenticatedUser, Role, require_read
+from app.auth.tenancy import get_scoped_run
 from app.core.config import get_data_dir, get_settings
 from app.ipir.package import IPIRPackage
 from app.services.scenario_service import derive_scenario_package
@@ -71,39 +73,42 @@ def resolve_demo_package(package_id: str) -> IPIRPackage:
 
 
 @router.get("/system/info")
-def get_system_info() -> dict[str, Any]:
+def get_system_info(user: AuthenticatedUser = Depends(require_read)) -> dict[str, Any]:
     """Returns runtime system and AI model information."""
     from app.agents.config import get_agent_config
 
     settings = get_settings()
     agent_config = get_agent_config()
-    return {
+    info: dict[str, Any] = {
         "gemini_model": agent_config.gemini_model,
-        "gemini_model_display": "Gemini 3.7 Flash",
+        "gemini_model_display": agent_config.gemini_model,
+        "vertex_ai_location": agent_config.location,
         "agent_framework": "Google GenAI SDK",
         "agent_provider": "Google Vertex AI",
         "agent_supervisor": "Google GenAI SDK Structured-Decision Supervisor",
         "ipir_version": "0.1",
-        "cloud_project": settings.google_cloud_project,
-        "region": settings.google_cloud_region,
-        "run_store": agent_config.run_store,
-        "bigquery_enabled": settings.bigquery_enabled,
     }
+    # Deployment topology is operational detail: administrators only.
+    if user.role == Role.ADMIN:
+        info.update(
+            {
+                "cloud_project": settings.google_cloud_project,
+                "region": settings.google_cloud_region,
+                "run_store": agent_config.run_store,
+                "bigquery_enabled": settings.bigquery_enabled,
+            }
+        )
+    return info
 
 
 @router.get("/assurance/runs/{run_id}/events")
-def get_assurance_run_events(run_id: str) -> dict[str, Any]:
+def get_assurance_run_events(run_id: str, user: AuthenticatedUser = Depends(require_read)) -> dict[str, Any]:
     """Fetches ordered workflow event timeline for a run (Mission V2 'MIS-*'
     or legacy 'RUN-*' id -- this endpoint is generic over the run store and
     is what the live Mission detail page's Agent Action Timeline actually
     calls; it is not itself part of the retired legacy pipeline)."""
     store = get_run_store()
-    record = store.get_run(run_id)
-    if not record:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Assurance run '{run_id}' not found.",
-        )
+    get_scoped_run(store, run_id, user, kind="Assurance run")
 
     events = store.get_events(run_id)
     return {
@@ -114,17 +119,12 @@ def get_assurance_run_events(run_id: str) -> dict[str, Any]:
 
 
 @router.get("/assurance/runs/{run_id}/evidence")
-def get_assurance_run_evidence(run_id: str) -> dict[str, Any]:
+def get_assurance_run_evidence(run_id: str, user: AuthenticatedUser = Depends(require_read)) -> dict[str, Any]:
     """Fetches evidence lineage records for a run (Mission V2 'MIS-*' or
     legacy 'RUN-*' id) -- see get_assurance_run_events docstring; this is
     also live, used by the Mission detail page's Evidence Lineage tab."""
     store = get_run_store()
-    record = store.get_run(run_id)
-    if not record:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Assurance run '{run_id}' not found.",
-        )
+    get_scoped_run(store, run_id, user, kind="Assurance run")
 
     evidence_list: list[EvidenceRecord] = store.get_evidence(run_id)
     return {

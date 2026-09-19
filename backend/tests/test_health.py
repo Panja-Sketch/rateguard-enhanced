@@ -53,4 +53,6 @@ def test_readiness_endpoint_reports_degraded_on_run_store_failure(client: TestCl
         data = response.json()
         assert data["status"] == "degraded"
         assert data["checks"]["run_store"]["status"] == "degraded"
-        assert "boom" in data["checks"]["run_store"]["detail"]
+        # Exception text must never reach an unauthenticated caller.
+        assert "boom" not in response.text
+        assert data["checks"]["run_store"]["detail"] == "Run store check failed."

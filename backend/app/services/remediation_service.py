@@ -14,7 +14,6 @@ from app.models.mission import (
     RevalidationResult,
 )
 
-
 # Friendly labels keyed by the DifferenceType prefix that
 # app.services.finding_conversion.to_material_findings always puts before
 # ": " in a MaterialFinding's title. MaterialFinding itself has no

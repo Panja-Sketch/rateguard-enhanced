@@ -47,25 +47,26 @@ def test_system_status_gemini_reports_vertex_ai_configuration(monkeypatch):
     reported a hardcoded, unrelated 'location' field (a stale
     AgentConfig.location default of 'us-central1', the general Cloud
     Run/GCP deployment region) instead of the actual effective Gemini
-    location (GOOGLE_CLOUD_LOCATION='global' in this deployment)."""
+    location (VERTEX_AI_LOCATION='us', the locked value)."""
     _clear_auth_env(monkeypatch)
     monkeypatch.setenv("GOOGLE_GENAI_USE_VERTEXAI", "true")
-    monkeypatch.setenv("GOOGLE_CLOUD_LOCATION", "global")
 
     res = client.get("/api/v1/system/status")
     assert res.status_code == 200
     gemini = res.json()["gemini"]
 
-    assert gemini["configured_model_id"] == "gemini-3.7-flash"
+    assert gemini["configured_model_id"] == "gemini-3.1-flash-lite"
     assert gemini["provider"] == "Google Vertex AI"
     assert "Google GenAI SDK" in gemini["framework"]
     assert gemini["auth_mode"] == "VERTEX_AI"
-    assert gemini["configured_location"] == "global"
+    assert gemini["configured_location"] == "us"
     assert gemini["configured_location"] != "us-central1"
     assert gemini["endpoint_probe_invoked"] is False
 
 
-def test_system_status_gemini_reports_api_key_configuration(monkeypatch):
+def test_system_status_ignores_api_key_configuration(monkeypatch):
+    """API keys are forbidden (locked doc 11.2): an ambient key must not select
+    an auth mode and must never be echoed."""
     _clear_auth_env(monkeypatch)
     monkeypatch.setenv("GOOGLE_API_KEY", "fake-key-value")
 
@@ -73,9 +74,8 @@ def test_system_status_gemini_reports_api_key_configuration(monkeypatch):
     assert res.status_code == 200
     gemini = res.json()["gemini"]
 
-    assert gemini["provider"] == "Google Gemini API"
-    assert gemini["auth_mode"] == "API_KEY"
-    assert gemini["configured_location"] is None
+    assert gemini["auth_mode"] == "NONE"
+    assert gemini["provider"] == "Not configured"
     assert "fake-key-value" not in str(res.json())
 
 
@@ -97,7 +97,6 @@ def test_system_status_never_constructs_a_gemini_client(monkeypatch):
     constructs a real google.genai.Client."""
     _clear_auth_env(monkeypatch)
     monkeypatch.setenv("GOOGLE_GENAI_USE_VERTEXAI", "true")
-    monkeypatch.setenv("GOOGLE_CLOUD_LOCATION", "global")
 
     def _fail_if_constructed(*args, **kwargs):  # pragma: no cover - must never run
         raise AssertionError("/api/v1/system/status must never construct a google.genai.Client")

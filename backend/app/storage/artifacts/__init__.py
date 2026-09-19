@@ -4,6 +4,7 @@ from app.storage.artifacts.gcs_store import GCSArtifactStore
 from app.storage.artifacts.interfaces import BaseArtifactStore
 from app.storage.artifacts.local_store import LocalArtifactStore
 from app.storage.artifacts.models import ArtifactCategory, ArtifactDescriptor
+from app.storage.artifacts.paths import ArtifactKey, ArtifactPathError
 
 _global_artifact_store: BaseArtifactStore | None = None
 
@@ -24,6 +25,8 @@ def get_artifact_store() -> BaseArtifactStore:
 
 __all__ = [
     "ArtifactCategory",
+    "ArtifactKey",
+    "ArtifactPathError",
     "ArtifactDescriptor",
     "BaseArtifactStore",
     "GCSArtifactStore",

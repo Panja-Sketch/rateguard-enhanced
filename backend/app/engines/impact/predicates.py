@@ -10,6 +10,7 @@ from app.ipir.package import IPIRPackage
 from app.ipir.rules import ComparisonCondition
 from app.ipir.tables import RangeMatch, TableLookupType
 
+
 # A predicate with no clauses and no temporal window matches every policy
 # (see app.engines.portfolio.predicate_evaluator.matches_predicate) -- this
 # is the correct, honest representation for a change with no risk-based

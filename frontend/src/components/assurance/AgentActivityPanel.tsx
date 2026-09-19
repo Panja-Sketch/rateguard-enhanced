@@ -91,7 +91,7 @@ export function AgentActivityPanel({
           </p>
         </div>
         <span className="rounded bg-sky-950 px-2.5 py-1 text-xs font-mono font-medium text-sky-300 border border-sky-800">
-          gemini-3.7-flash via google-genai
+          gemini-3.1-flash-lite via google-genai
         </span>
       </div>
 

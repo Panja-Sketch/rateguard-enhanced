@@ -16,7 +16,8 @@ Reviewed against the installed google-genai==2.19.0 SDK:
     implements the context-manager protocol) so its underlying HTTP session
     is always closed, rather than caching one Client for the process lifetime.
   - exactly one authentication mode is resolved explicitly by this class
-    (Vertex AI ADC, then an API key, then none) and recorded on the evidence —
+    (Vertex AI with Application Default Credentials, or none — API keys are
+    forbidden by locked doc section 11.2 and are never read) and recorded on the evidence —
     the bare SDK default of letting `Client()` sniff environment variables
     itself is not used, so the active mode is always observable, not implicit.
   - `APIError.__str__` is built only from `(code, status, response_json)` —
@@ -61,7 +62,6 @@ FAILURE_MALFORMED_RESPONSE = "MALFORMED_RESPONSE"
 FAILURE_SCHEMA_INVALID = "SCHEMA_INVALID"
 
 AUTH_MODE_VERTEX_AI = "VERTEX_AI"
-AUTH_MODE_API_KEY = "API_KEY"
 AUTH_MODE_NONE = "NONE"
 AUTH_MODE_TEST_FAKE = "TEST_FAKE"
 
@@ -119,15 +119,18 @@ class GeminiDecisionClient:
         self._client_factory = client_factory
 
     def _resolve_auth_mode(self) -> tuple[str, dict[str, Any]]:
-        """Explicitly resolves exactly one authentication mode, in a fixed,
-        observable precedence: Vertex AI (ADC) > API key > none. This class
-        decides — it never lets the bare SDK's own environment-sniffing
-        silently pick a mode for us, so the active mode is always recorded."""
+        """Explicitly resolves exactly one authentication mode: Vertex AI with
+        Application Default Credentials, or none. API keys (`GOOGLE_API_KEY`/
+        `GEMINI_API_KEY`) are forbidden by locked doc section 11.2 and are
+        deliberately never read here — even if present, they cannot select a
+        mode (the application also refuses to start with one set, see
+        app.core.runtime_config). Project and location are passed explicitly
+        so the SDK never sniffs them from ambient environment variables."""
         if os.getenv("GOOGLE_GENAI_USE_VERTEXAI", "").strip().lower() in ("1", "true"):
-            return AUTH_MODE_VERTEX_AI, {"vertexai": True}
-        api_key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
-        if api_key:
-            return AUTH_MODE_API_KEY, {"api_key": api_key}
+            kwargs: dict[str, Any] = {"vertexai": True, "location": self.config.location}
+            if self.config.google_cloud_project:
+                kwargs["project"] = self.config.google_cloud_project
+            return AUTH_MODE_VERTEX_AI, kwargs
         return AUTH_MODE_NONE, {}
 
     def describe_runtime(self) -> dict[str, Any]:
@@ -156,18 +159,10 @@ class GeminiDecisionClient:
 
         if auth_mode == AUTH_MODE_VERTEX_AI:
             provider = "Google Vertex AI"
-            # The google-genai SDK's Vertex AI mode (`Client(vertexai=True)`)
-            # resolves project/location from these exact env vars when no
-            # explicit kwargs are passed — which is how every real call in
-            # `decide()` constructs its client. This is deliberately NOT
-            # `settings.google_cloud_region` (the general Cloud Run/GCP
-            # deployment region, e.g. "us-central1") — that is a different
-            # concept and reporting it here as the Gemini location is exactly
-            # the defect this method fixes.
-            configured_location = os.getenv("GOOGLE_CLOUD_LOCATION")
-        elif auth_mode == AUTH_MODE_API_KEY:
-            provider = "Google Gemini API"
-            configured_location = None  # the Gemini Developer API has no location concept
+            # The effective Vertex AI location is the validated
+            # VERTEX_AI_LOCATION (`us`), passed explicitly to the SDK client by
+            # `_resolve_auth_mode` -- never the Cloud Run deployment region.
+            configured_location = self.config.location
         else:
             provider = "Not configured"
             configured_location = None

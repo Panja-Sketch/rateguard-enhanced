@@ -1,5 +1,15 @@
 #!/usr/bin/env bash
 # Automated RateGuard Cloud Deployment & Multi-Service Architecture Configuration Script
+#
+# DEPRECATED / WRONG PROJECT: this script targets the old `rateguard-ai`
+# project and its production application, which must never be touched by
+# RateGuard Enhanced work (see docs/architecture/RATEGUARD_LOCKED_SOURCE_OF_TRUTH.md
+# and the authorized deployment target: project `rateguard-enhanced`). It is
+# kept only for historical reference and refuses to run. Use
+# infrastructure/deploy_candidate_enhanced.sh instead.
+
+echo "REFUSING TO RUN: this script targets the old 'rateguard-ai' project, which must never be deployed to or modified by RateGuard Enhanced work. Use infrastructure/deploy_candidate_enhanced.sh instead." >&2
+exit 1
 
 set -euo pipefail
 
@@ -36,7 +46,7 @@ fi
 
 # Grant least-privilege roles to Runtime SA
 RUNTIME_ROLES=(
-  "roles/aiplatform.user"       # Vertex AI / Gemini 3.7 Flash invocation
+  "roles/aiplatform.user"       # Vertex AI / Gemini 3.1 Flash-Lite invocation
   "roles/datastore.user"        # Firestore read/write
   "roles/bigquery.dataEditor"   # BigQuery results table write
   "roles/bigquery.jobUser"      # BigQuery query execution
@@ -237,5 +247,5 @@ echo "Private Worker Service:  $WORKER_URL"
 echo "Public Web Dashboard:    $WEB_URL"
 echo "Pub/Sub Push Endpoint:   ${WORKER_URL}/internal/pubsub/assurance"
 echo "Backend Image:           $BACKEND_IMAGE"
-echo "Gemini Model:            gemini-3.7-flash"
+echo "Gemini Model:            gemini-3.1-flash-lite"
 echo "========================================================"

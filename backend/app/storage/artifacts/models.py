@@ -19,6 +19,12 @@ class ArtifactDescriptor(BaseModel):
     """Metadata descriptor for a stored artifact in local or GCS storage."""
 
     artifact_id: str
+    # Tenant-aware location (locked doc 14.2). Set from the authenticated server
+    # context only; a store refuses to save a descriptor without all four.
+    tenant_id: str | None = None
+    scope: str | None = None  # "sources" | "missions"
+    scope_id: str | None = None  # source_id or mission_id
+    kind: str | None = None  # "raw" | "compiled" | "evidence"
     run_id: str | None = None
     category: ArtifactCategory
     filename: str

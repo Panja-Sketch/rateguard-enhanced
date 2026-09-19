@@ -87,3 +87,14 @@ data/artifacts/
 backend/.env
 frontend/.env.local
 firebase-admin-key.json
+
+# Playwright output
+frontend/test-results/
+frontend/playwright-report/
+
+# Firestore rules test tooling
+infrastructure/firestore-rules-tests/node_modules/
+infrastructure/firestore-debug.log
+infrastructure/firebase-debug.log
+firestore-debug.log
+ui-debug.log

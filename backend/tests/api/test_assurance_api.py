@@ -18,7 +18,7 @@ def test_system_info() -> None:
     res = client.get("/api/v1/system/info")
     assert res.status_code == 200
     data = res.json()
-    assert data["gemini_model"] == "gemini-3.7-flash"
+    assert data["gemini_model"] == "gemini-3.1-flash-lite"
     assert data["agent_framework"] == "Google GenAI SDK"
     assert data["agent_provider"] == "Google Vertex AI"
     assert data["agent_supervisor"] == "Google GenAI SDK Structured-Decision Supervisor"

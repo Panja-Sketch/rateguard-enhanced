@@ -1,11 +1,22 @@
+import hashlib
+import json
 import logging
 import uuid
 from datetime import UTC, datetime
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Query, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from pydantic import BaseModel, Field
 
+from app.api.sources import source_accessible
+from app.auth import (
+    AuthenticatedUser,
+    require_admin,
+    require_evidence_download,
+    require_read,
+    require_release_write,
+)
+from app.auth.tenancy import get_scoped_run, include_legacy_for, not_found
 from app.messaging import AssuranceJob, get_message_publisher
 from app.models.mission import (
     AssuranceMission,
@@ -15,6 +26,7 @@ from app.models.mission import (
     PricingSourceRef,
     ValidationIssue,
 )
+from app.ratelimit import rate_limited
 from app.services.mission_transitions import (
     MAX_RETRY_ATTEMPTS,
     apply_transition,
@@ -24,6 +36,12 @@ from app.services.mission_transitions import (
 )
 from app.services.validation_service import MissionValidationService
 from app.storage import AssuranceRunRecord, AssuranceRunStatus, get_run_store
+from app.storage.artifacts import (
+    ArtifactCategory,
+    ArtifactDescriptor,
+    ArtifactPathError,
+    get_artifact_store,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1", tags=["assurance-missions-v2"])
@@ -75,6 +93,8 @@ def _validation_error(message: str, issues: list) -> HTTPException:
 def create_assurance_mission(
     req: CreateMissionRequest,
     response: Response,
+    user: AuthenticatedUser = Depends(require_release_write),
+    _quota: None = Depends(rate_limited("mission_create")),
 ) -> dict[str, Any]:
     """Validates request synchronously, persists mission as QUEUED, publishes Pub/Sub job, and returns HTTP 202 Accepted.
     Production mission execution NEVER runs in-process inside the API Cloud Run service.
@@ -94,6 +114,20 @@ def create_assurance_mission(
                 )
             ],
         )
+
+    # Tenant scoping: an uploaded source id belonging to another tenant is
+    # indistinguishable from an unknown one (no cross-tenant enumeration).
+    source_issues = [
+        ValidationIssue(
+            field=field,
+            code="SOURCE_NOT_FOUND",
+            message="The referenced source was not found.",
+        )
+        for field, ref in (("source_a", req.source_a), ("source_b", req.source_b))
+        if ref is not None and not source_accessible(ref.source_id, user)
+    ]
+    if source_issues:
+        raise _validation_error("Mission validation failed.", source_issues)
 
     mission_id = f"MIS-{uuid.uuid4().hex[:8].upper()}"
     correlation_id = f"CORR-{uuid.uuid4().hex[:8].upper()}"
@@ -138,6 +172,8 @@ def create_assurance_mission(
     # Persist QUEUED mission state
     record = AssuranceRunRecord(
         run_id=mission_id,
+        tenant_id=user.tenant_id,
+        created_by=user.uid,
         status=AssuranceRunStatus.QUEUED,
         workflow_stage="QUEUED",
         left_package_id=req.source_a.source_id,
@@ -177,6 +213,7 @@ def create_assurance_mission(
         job_type="ASSURANCE_MISSION_V2",
         schema_version=2,
         correlation_id=correlation_id,
+        tenant_id=user.tenant_id,
         left_source_id=req.source_a.source_id,
         right_source_id=req.source_b.source_id if req.source_b else None,
         left_package_id=req.source_a.source_id,
@@ -233,7 +270,7 @@ def create_assurance_mission(
 # entirely (not just out of the displayed page) if enough of the most-recent
 # records happen to be demo/legacy/archived. MAX_SCAN_RECORDS bounds how far
 # this endpoint will widen the fetch window looking for enough matches.
-MAX_SCAN_RECORDS = 2000
+MAX_SCAN_RECORDS = 1000  # == storage MAX_TENANT_LIST_RECORDS
 
 
 def _mission_matches_filters(
@@ -301,12 +338,13 @@ def _mission_summary(r: Any, meta: dict[str, Any]) -> dict[str, Any]:
 @router.get("/missions")
 def list_assurance_missions(
     limit: int = Query(default=50, ge=1, le=200),
-    offset: int = Query(default=0, ge=0),
+    offset: int = Query(default=0, ge=0, le=MAX_SCAN_RECORDS),
     status_filter: str | None = Query(default=None, alias="status"),
     mode_filter: str | None = Query(default=None, alias="mode"),
     decision_filter: str | None = Query(default=None, alias="decision"),
     include_legacy: bool = Query(default=False),
     include_demo_samples: bool = Query(default=False),
+    user: AuthenticatedUser = Depends(require_read),
 ) -> dict[str, Any]:
     """Lists Mission V2 assurance records with pagination and filtering.
 
@@ -325,7 +363,8 @@ def list_assurance_missions(
     records: list[Any] = []
 
     while True:
-        records = store.list_runs(limit=window)
+        # Database-level tenant predicate: other tenants' records are never fetched.
+        records = store.list_runs_for_tenant(user.tenant_id, limit=window, include_legacy=include_legacy_for(user))
         mission_list = []
         for r in records:
             meta = r.metadata if isinstance(r.metadata, dict) else {}
@@ -350,15 +389,10 @@ def list_assurance_missions(
 
 
 @router.get("/missions/{mission_id}")
-def get_assurance_mission(mission_id: str) -> dict[str, Any]:
+def get_assurance_mission(mission_id: str, user: AuthenticatedUser = Depends(require_read)) -> dict[str, Any]:
     """Retrieves full mission state and AssuranceResultV2."""
     store = get_run_store()
-    record = store.get_run(mission_id)
-    if not record:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Assurance mission '{mission_id}' not found.",
-        )
+    record = get_scoped_run(store, mission_id, user)
 
     res_dict = record.report if isinstance(record.report, dict) else {}
     meta = record.metadata if isinstance(record.metadata, dict) else {}
@@ -407,7 +441,7 @@ _SAFE_GEMINI_EVIDENCE_FIELDS = (
 
 
 @router.get("/missions/{mission_id}/evidence")
-def get_mission_gemini_evidence(mission_id: str) -> dict[str, Any]:
+def get_mission_gemini_evidence(mission_id: str, user: AuthenticatedUser = Depends(require_read)) -> dict[str, Any]:
     """Read-only, sanitized Gemini decision evidence for one mission.
 
     Intended for authorized candidate/staging deployment verification (see
@@ -423,12 +457,7 @@ def get_mission_gemini_evidence(mission_id: str) -> dict[str, Any]:
     is safe", it is exactly this fixed list.
     """
     store = get_run_store()
-    record = store.get_run(mission_id)
-    if not record:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Assurance mission '{mission_id}' not found.",
-        )
+    get_scoped_run(store, mission_id, user)
 
     from app.storage import EvidenceType
 
@@ -449,6 +478,64 @@ def get_mission_gemini_evidence(mission_id: str) -> dict[str, Any]:
     }
 
 
+@router.get("/missions/{mission_id}/evidence/download")
+def download_mission_evidence_bundle(
+    mission_id: str,
+    user: AuthenticatedUser = Depends(require_evidence_download),
+    _quota: None = Depends(rate_limited("evidence_download")),
+) -> Response:
+    """Downloadable JSON evidence bundle (locked doc 4.1.F). Tenant-scoped;
+    read-only VIEWERs may read evidence summaries but not export the bundle."""
+    store = get_run_store()
+    record = get_scoped_run(store, mission_id, user)
+    tenant_id = record.tenant_id or user.tenant_id
+    # The hashed/stored body excludes who/when exported, so the same evidence
+    # always yields the same artifact id (idempotent: repeated downloads never
+    # multiply stored objects).
+    content = {
+        "mission_id": mission_id,
+        "tenant_id": tenant_id,
+        "decision": record.decision,
+        "events": [e.model_dump(mode="json") for e in store.get_events(mission_id)],
+        "evidence": [ev.model_dump(mode="json") for ev in store.get_evidence(mission_id)],
+    }
+    canonical = json.dumps(content, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+    bundle_sha = hashlib.sha256(canonical).hexdigest()
+    try:
+        get_artifact_store().save_artifact(
+            ArtifactDescriptor(
+                artifact_id=f"EVB-{bundle_sha[:32]}",
+                tenant_id=user.tenant_id,
+                scope="missions",
+                scope_id=mission_id,
+                kind="evidence",
+                category=ArtifactCategory.ASSURANCE_REPORT,
+                filename=f"{mission_id}-evidence.json",
+                content_type="application/json",
+                size_bytes=len(canonical),
+                storage_uri="",
+            ),
+            canonical,
+        )
+    except ArtifactPathError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Assurance mission '{mission_id}' not found.") from None
+    payload = {
+        "bundle_sha256": bundle_sha,
+        "exported_at": datetime.now(UTC).isoformat(),
+        "exported_by": user.uid,
+        **content,
+    }
+    return Response(
+        content=json.dumps(payload, indent=2, default=str),
+        media_type="application/json",
+        headers={
+            "Content-Disposition": f'attachment; filename="{mission_id}-evidence.json"',
+            "X-Content-Type-Options": "nosniff",
+            "Cache-Control": "no-store",
+        },
+    )
+
+
 _SAFE_CONNECTOR_EVIDENCE_FIELDS = (
     "connector_id",
     "engine_version",
@@ -463,7 +550,9 @@ _SAFE_CONNECTOR_EVIDENCE_FIELDS = (
 
 
 @router.get("/missions/{mission_id}/connector-evidence")
-def get_mission_connector_evidence(mission_id: str) -> dict[str, Any]:
+def get_mission_connector_evidence(
+    mission_id: str, user: AuthenticatedUser = Depends(require_read)
+) -> dict[str, Any]:
     """Read-only, sanitized connector-invocation evidence for one mission.
 
     Every returned object is built from an explicit field whitelist
@@ -471,12 +560,7 @@ def get_mission_connector_evidence(mission_id: str) -> dict[str, Any]:
     base URL, credential, raw request/response body, or stack trace.
     """
     store = get_run_store()
-    record = store.get_run(mission_id)
-    if not record:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Assurance mission '{mission_id}' not found.",
-        )
+    get_scoped_run(store, mission_id, user)
 
     from app.storage import EvidenceType
 
@@ -504,7 +588,11 @@ class AlignmentOptionsRequest(BaseModel):
 
 
 @router.post("/missions/{mission_id}/alignment-options")
-def generate_alignment_options(mission_id: str, payload: AlignmentOptionsRequest) -> dict[str, Any]:
+def generate_alignment_options(
+    mission_id: str,
+    payload: AlignmentOptionsRequest,
+    user: AuthenticatedUser = Depends(require_release_write),
+) -> dict[str, Any]:
     """On-demand, symmetric directional patch generation for Equivalence-mode
     missions only.
 
@@ -524,12 +612,7 @@ def generate_alignment_options(mission_id: str, payload: AlignmentOptionsRequest
     from app.services.remediation_service import RemediationService
 
     store = get_run_store()
-    record = store.get_run(mission_id)
-    if not record:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Assurance mission '{mission_id}' not found.",
-        )
+    record = get_scoped_run(store, mission_id, user)
 
     status_str = record.status.value if hasattr(record.status, "value") else str(record.status)
     if status_str not in ("COMPLETED", "NEEDS_REVIEW", "ARCHIVED"):
@@ -560,8 +643,8 @@ def generate_alignment_options(mission_id: str, payload: AlignmentOptionsRequest
         )
 
     try:
-        left_pkg = _resolve_source_package(mission.source_a)
-        right_pkg = _resolve_source_package(mission.source_b)
+        left_pkg = _resolve_source_package(mission.source_a, user.tenant_id)
+        right_pkg = _resolve_source_package(mission.source_b, user.tenant_id)
     except Exception as exc:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -597,7 +680,9 @@ def generate_alignment_options(mission_id: str, payload: AlignmentOptionsRequest
 
 
 @router.post("/missions/{mission_id}/cancel")
-def cancel_assurance_mission(mission_id: str) -> dict[str, Any]:
+def cancel_assurance_mission(
+    mission_id: str, user: AuthenticatedUser = Depends(require_release_write)
+) -> dict[str, Any]:
     """Cancels a mission. QUEUED/VALIDATING/WAITING_RETRY/DRAFT transition directly to
     CANCELLED. RUNNING missions instead set `cancellation_requested`, which the worker/
     supervisor checks cooperatively between stages before continuing. Idempotent: a
@@ -611,12 +696,7 @@ def cancel_assurance_mission(mission_id: str) -> dict[str, Any]:
     )
 
     store = get_run_store()
-    record = store.get_run(mission_id)
-    if not record:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Assurance mission '{mission_id}' not found.",
-        )
+    record = get_scoped_run(store, mission_id, user)
 
     status_str = record.status.value if hasattr(record.status, "value") else str(record.status)
 
@@ -654,7 +734,8 @@ def cancel_assurance_mission(mission_id: str) -> dict[str, Any]:
     record.metadata["cancellation_requested"] = True
     record.cancellation_requested = True
     record.status_reason = "Cancellation requested; awaiting cooperative stop by worker."
-    store.update_run(record)
+    if store.update_run_for_tenant(record, user.tenant_id, include_legacy=include_legacy_for(user)) is None:
+        raise not_found("Assurance mission", mission_id)
     store.log_event(run_id=mission_id, stage=status_str, message="Cancellation requested for running mission.")
     return {
         "mission_id": mission_id,
@@ -665,18 +746,17 @@ def cancel_assurance_mission(mission_id: str) -> dict[str, Any]:
 
 
 @router.post("/missions/{mission_id}/retry")
-def retry_assurance_mission(mission_id: str) -> dict[str, Any]:
+def retry_assurance_mission(
+    mission_id: str,
+    user: AuthenticatedUser = Depends(require_release_write),
+    _quota: None = Depends(rate_limited("mission_create")),
+) -> dict[str, Any]:
     """Retries an eligible FAILED or WAITING_RETRY mission: increments attempt_number,
     preserves prior evidence/failure history, and re-queues via Pub/Sub with the same
     idempotent job dispatch used for the original mission (worker leasing prevents
     duplicate concurrent execution)."""
     store = get_run_store()
-    record = store.get_run(mission_id)
-    if not record:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Assurance mission '{mission_id}' not found.",
-        )
+    record = get_scoped_run(store, mission_id, user)
 
     if not is_retryable(record):
         status_str = record.status.value if hasattr(record.status, "value") else str(record.status)
@@ -717,7 +797,7 @@ def retry_assurance_mission(mission_id: str) -> dict[str, Any]:
     record.attempt_number = next_attempt
     record.cancellation_requested = False
     record.queued_at = datetime.now(UTC)
-    store.update_run(record)
+    store.update_run_for_tenant(record, user.tenant_id, include_legacy=include_legacy_for(user))
 
     store.log_event(
         run_id=mission_id,
@@ -765,18 +845,15 @@ def retry_assurance_mission(mission_id: str) -> dict[str, Any]:
 
 
 @router.post("/missions/{mission_id}/archive")
-def archive_assurance_mission(mission_id: str) -> dict[str, Any]:
+def archive_assurance_mission(
+    mission_id: str, user: AuthenticatedUser = Depends(require_release_write)
+) -> dict[str, Any]:
     """Soft-archives a terminal (COMPLETED/FAILED/CANCELLED/NEEDS_REVIEW) assurance
     mission audit record. Does not force COMPLETED on missions that failed or were
     cancelled — the underlying status is preserved and only `archived`/ARCHIVED
     bookkeeping is applied."""
     store = get_run_store()
-    record = store.get_run(mission_id)
-    if not record:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Assurance mission '{mission_id}' not found.",
-        )
+    record = get_scoped_run(store, mission_id, user)
 
     status_str = record.status.value if hasattr(record.status, "value") else str(record.status)
     from app.services.mission_transitions import ARCHIVABLE_STATUSES
@@ -805,7 +882,9 @@ def archive_assurance_mission(mission_id: str) -> dict[str, Any]:
 
 
 @router.delete("/missions/{mission_id}")
-def delete_assurance_mission(mission_id: str) -> dict[str, Any]:
+def delete_assurance_mission(
+    mission_id: str, user: AuthenticatedUser = Depends(require_admin)
+) -> dict[str, Any]:
     """Permanently deletes eligible disposable missions only: DRAFT, CANCELLED, or
     FAILED demo/sample missions. Completed or otherwise compliance-retained missions
     must be archived instead (409). Historical legacy RUN-* records are never deleted
@@ -813,12 +892,7 @@ def delete_assurance_mission(mission_id: str) -> dict[str, Any]:
     the record no longer exists.
     """
     store = get_run_store()
-    record = store.get_run(mission_id)
-    if not record:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Assurance mission '{mission_id}' not found.",
-        )
+    record = get_scoped_run(store, mission_id, user)
 
     if mission_id.startswith("RUN-") and not mission_id.startswith("RUN-DEMO"):
         raise HTTPException(
@@ -843,7 +917,7 @@ def delete_assurance_mission(mission_id: str) -> dict[str, Any]:
             },
         )
 
-    deleted = store.delete_run(mission_id)
+    deleted = store.delete_run_for_tenant(mission_id, user.tenant_id, include_legacy=include_legacy_for(user))
     if not deleted:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,

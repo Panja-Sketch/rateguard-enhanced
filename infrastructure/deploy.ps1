@@ -61,7 +61,7 @@ if (-not $saExists) {
 
 # Grant least-privilege roles to Runtime SA
 $RUNTIME_ROLES = @(
-  "roles/aiplatform.user",       # Vertex AI / Gemini 3.7 Flash invocation
+  "roles/aiplatform.user",       # Vertex AI / Gemini 3.1 Flash-Lite invocation
   "roles/datastore.user",        # Firestore read/write
   "roles/bigquery.dataEditor",   # BigQuery results table write
   "roles/bigquery.jobUser",      # BigQuery query execution
@@ -324,5 +324,5 @@ Write-Host "Public Web Dashboard:    $WEB_URL"
 Write-Host "Pub/Sub Push Endpoint:   ${WORKER_URL}/internal/pubsub/assurance"
 Write-Host "Backend Image:           $BACKEND_IMAGE"
 Write-Host "Frontend Image:          $FRONTEND_IMAGE"
-Write-Host "Gemini Model:            gemini-3.7-flash"
+Write-Host "Gemini Model:            gemini-3.1-flash-lite"
 Write-Host "========================================================"

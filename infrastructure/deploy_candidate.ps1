@@ -1,3 +1,9 @@
+# DEPRECATED / WRONG PROJECT for RateGuard Enhanced: PROJECT_ID below is
+# "rateguard-ai" -- the old project, which must never be touched by
+# RateGuard Enhanced work. Default (no-switch) mode is a safe, zero-gcloud
+# plan printer, kept intact for historical/test reference; use
+# infrastructure/deploy_candidate_enhanced.sh for "rateguard-enhanced".
+#
 # RateGuard AI -- Isolated Candidate/Staging Deployment (PowerShell mirror of deploy_candidate.sh)
 #
 # SAFETY: by default (no -DeployCandidate/-ResumeCandidate switch) this script
@@ -206,8 +212,8 @@ function Write-CandidateEnvFile {
 RATEGUARD_AGENT_ENABLED: "true"
 GOOGLE_GENAI_USE_VERTEXAI: "true"
 GOOGLE_CLOUD_PROJECT: "$PROJECT_ID"
-GOOGLE_CLOUD_LOCATION: "global"
-RATEGUARD_GEMINI_MODEL: "gemini-3.7-flash"
+GOOGLE_CLOUD_LOCATION: "us"
+RATEGUARD_GEMINI_MODEL: "gemini-3.1-flash-lite"
 RATEGUARD_RUN_STORE: "firestore"
 RATEGUARD_PUBSUB_TOPIC: "$STAGING_TOPIC"
 RATEGUARD_PUBSUB_SUBSCRIPTION: "$STAGING_SUBSCRIPTION"

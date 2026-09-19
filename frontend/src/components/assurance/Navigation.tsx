@@ -2,12 +2,15 @@
 
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { ShieldCheck, Cpu, FileCode2, History, Network, RefreshCw } from 'lucide-react';
+import { ShieldCheck, Cpu, FileCode2, History, Network, RefreshCw, LogOut } from 'lucide-react';
 import { useCallback, useEffect, useState } from 'react';
 import { fetchHealth } from '@/lib/api/client';
+import { useAuth } from '@/lib/auth/AuthProvider';
+import { canAuthorReleases, roleLabel } from '@/lib/auth/roles';
 
 export function Navigation() {
   const pathname = usePathname();
+  const { status, email, session, signOut } = useAuth();
   const [systemOnline, setSystemOnline] = useState<boolean | null>(null);
   const [checking, setChecking] = useState(false);
 
@@ -23,10 +26,17 @@ export function Navigation() {
     checkHealth();
   }, [checkHealth]);
 
+  // Navigation is shown only to a signed-in user. Links a role cannot use are
+  // hidden as a usability aid; the API enforces the real permission on every call.
+  if (status !== 'signed-in' || pathname === '/login') {
+    return null;
+  }
+
+  const authors = canAuthorReleases(session?.role);
   const links = [
     { href: '/', label: 'Overview', icon: ShieldCheck },
-    { href: '/missions/new', label: 'Start Mission', icon: Cpu },
-    { href: '/sources', label: 'Sources', icon: FileCode2 },
+    ...(authors ? [{ href: '/missions/new', label: 'Start Mission', icon: Cpu }] : []),
+    ...(authors ? [{ href: '/sources', label: 'Sources', icon: FileCode2 }] : []),
     { href: '/missions', label: 'Mission History', icon: History },
     { href: '/architecture', label: 'Architecture', icon: Network },
   ];
@@ -78,6 +88,18 @@ export function Navigation() {
             </span>
             {systemOnline === false && <RefreshCw className="h-3 w-3 text-rose-400" />}
           </button>
+          <div className="flex items-center gap-2 text-xs text-slate-400" data-testid="session-badge">
+            <span className="max-w-[10rem] truncate" title={email ?? undefined}>{email}</span>
+            <span className="rounded bg-slate-900 px-2 py-0.5 border border-slate-800 text-slate-300">{roleLabel(session?.role)}</span>
+            <button
+              type="button"
+              onClick={() => void signOut()}
+              className="flex items-center gap-1 rounded-md border border-slate-800 px-2 py-1 text-slate-300 hover:border-slate-600"
+            >
+              <LogOut className="h-3 w-3" />
+              Sign out
+            </button>
+          </div>
         </div>
       </div>
     </header>

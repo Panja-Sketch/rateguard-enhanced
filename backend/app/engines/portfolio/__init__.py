@@ -2,6 +2,13 @@
 
 from app.core.config import get_data_dir
 from app.engines.portfolio.analyzer import PortfolioAnalyzer
+from app.engines.portfolio.consumer_protection import (
+    IMPACT_DISTRIBUTION_DISCLAIMER,
+    CohortDistributionResult,
+    PipelineImpactResult,
+    compute_cohort_distribution,
+    compute_pipeline_impact,
+)
 from app.engines.portfolio.errors import PortfolioAnalysisError
 from app.engines.portfolio.exposure import aggregate_portfolio_exposure
 from app.engines.portfolio.models import DefectExposure, PortfolioExposureResult, SyntheticPolicy
@@ -30,13 +37,18 @@ class PortfolioExposureAnalyzer:
 
 
 __all__ = [
+    "IMPACT_DISTRIBUTION_DISCLAIMER",
+    "CohortDistributionResult",
     "DefectExposure",
+    "PipelineImpactResult",
     "PortfolioAnalysisError",
     "PortfolioAnalyzer",
     "PortfolioExposureAnalyzer",
     "PortfolioExposureResult",
     "SyntheticPolicy",
     "aggregate_portfolio_exposure",
+    "compute_cohort_distribution",
+    "compute_pipeline_impact",
     "matches_predicate",
     "reprice_policy",
 ]

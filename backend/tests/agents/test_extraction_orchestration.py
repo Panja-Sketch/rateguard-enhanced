@@ -20,6 +20,7 @@ from app.agents.gemini_client import GeminiInvocationEvidence
 from app.agents.supervisor import AssuranceSupervisor
 from app.storage.memory_store import InMemoryRunStore
 
+T = "test-tenant"  # server-derived tenant; there is no tenantless default
 _DATA_DIR = Path(__file__).resolve().parent.parent.parent.parent / "data"
 
 
@@ -43,7 +44,7 @@ class FixedExtractorGeminiClient:
         })
         evidence = GeminiInvocationEvidence(
             invocation_id="GEM-FAKE-EXTRACT",
-            model_id="gemini-3.7-flash",
+            model_id="gemini-3.1-flash-lite",
             decision_type=decision_type,
             started_at=now,
             ended_at=now,
@@ -67,7 +68,7 @@ class AlwaysFailGeminiClient:
         now = datetime.now(UTC).isoformat()
         evidence = GeminiInvocationEvidence(
             invocation_id="GEM-FAKE-FAIL",
-            model_id="gemini-3.7-flash",
+            model_id="gemini-3.1-flash-lite",
             decision_type=decision_type,
             started_at=now,
             ended_at=now,
@@ -259,11 +260,11 @@ def test_ingestion_service_end_to_end_registers_hash_and_compiles_via_supervisor
     content = (_DATA_DIR / "actuarial" / "AZ_HO3_2026_09_rate_spec.json").read_bytes()
 
     descriptor = service.register_source(
-        filename="rate_spec.json", content_type="application/json", content=content,
+        filename="rate_spec.json", content_type="application/json", content=content, tenant_id=T,
     )
     assert len(descriptor.metadata["sha256"]) == 64
 
-    result = service.compile_source(descriptor)
+    result = service.compile_source(descriptor, tenant_id=T)
     assert result.evidence["selected_extractor"] == "structured_json_direct_parser"
     assert result.evidence["selection_kind"] == "DETERMINISTIC"
     assert result.evidence["source_sha256"] == descriptor.metadata["sha256"]
@@ -289,7 +290,7 @@ def test_ingestion_service_rejects_legacy_xls_and_pdf_uploads():
         ("filing.pdf", "application/pdf"),
     ]:
         try:
-            service.register_source(filename=filename, content_type=content_type, content=b"irrelevant")
+            service.register_source(filename=filename, content_type=content_type, content=b"irrelevant", tenant_id=T)
             raise AssertionError(f"Expected SourceParsingError for {filename}")
         except SourceParsingError as e:
             assert "not yet supported" in str(e)
@@ -310,9 +311,10 @@ def test_ingestion_service_rejects_unsafe_xlsx_workbook():
         filename="rate_spec.xlsx",
         content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         content=b"not a real xlsx file",
+        tenant_id=T,
     )
     try:
-        service.compile_source(descriptor)
+        service.compile_source(descriptor, tenant_id=T)
         raise AssertionError("Expected SourceParsingError for an invalid .xlsx archive")
     except SourceParsingError as e:
         assert "rejected" in str(e).lower()
@@ -336,10 +338,11 @@ def test_ingestion_service_compiles_canonical_workbook_v1_sample_end_to_end():
         filename="AZ_HO3_GOLDEN_workbook.xlsx",
         content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         content=content,
+        tenant_id=T,
     )
     assert descriptor.source_type == SourceFormat.EXCEL
 
-    result = service.compile_source(descriptor)
+    result = service.compile_source(descriptor, tenant_id=T)
     assert result.adapter_id == "controlled_workbook_v1_compiler"
     assert result.confidence == 1.0
     assert not result.requires_human_review
@@ -355,11 +358,11 @@ def test_ingestion_service_namespaces_package_id_to_source_id():
     service = PricingSourceIngestionService()
     content = (_DATA_DIR / "actuarial" / "AZ_HO3_2026_09_rate_spec.json").read_bytes()
 
-    desc_1 = service.register_source(filename="a.json", content_type="application/json", content=content)
-    desc_2 = service.register_source(filename="b.json", content_type="application/json", content=content)
+    desc_1 = service.register_source(filename="a.json", content_type="application/json", content=content, tenant_id=T)
+    desc_2 = service.register_source(filename="b.json", content_type="application/json", content=content, tenant_id=T)
 
-    result_1 = service.compile_source(desc_1)
-    result_2 = service.compile_source(desc_2)
+    result_1 = service.compile_source(desc_1, tenant_id=T)
+    result_2 = service.compile_source(desc_2, tenant_id=T)
 
     assert result_1.ipir_package.id != result_2.ipir_package.id
     assert desc_1.source_id in result_1.ipir_package.id

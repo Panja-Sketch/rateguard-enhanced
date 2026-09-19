@@ -1,14 +1,53 @@
 from typing import Any
 
-from fastapi import APIRouter, File, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, File, HTTPException, Response, UploadFile, status
 from pydantic import ValidationError
 
 from app.adapters.errors import SourceParsingError
+from app.auth import AuthenticatedUser, require_read, require_roles
+from app.auth.dependencies import RELEASE_WRITE_ROLES
+from app.auth.tenancy import is_visible_to, not_found
+from app.ratelimit import rate_limited
 from app.services.ingestion_service import PricingSourceIngestionService
+from app.storage.artifacts import ArtifactKey, ArtifactPathError, get_artifact_store
 
 router = APIRouter(prefix="/api/v1/sources", tags=["sources"])
 ingestion_service = PricingSourceIngestionService()
 _registered_sources: dict[str, Any] = {}
+
+# Raw/compiled source artifacts may be downloaded only by roles that may author
+# releases (locked doc 13.1: "authorized signed download"); read-only and
+# consumer-review roles never get source bytes.
+require_source_write = require_roles(*RELEASE_WRITE_ROLES)
+require_source_download = require_roles(*RELEASE_WRITE_ROLES)
+
+_UPLOADED_SOURCE_PREFIX = "SRC-"
+
+
+def _artifact_key(user: AuthenticatedUser, source_id: str, artifact_id: str) -> ArtifactKey | None:
+    """Tenant-prefixed key for a source's raw or compiled artifact, or None when
+    the ids are unsafe/unknown. The tenant is the caller's server-side tenant."""
+    if artifact_id == source_id:
+        kind = "raw"
+    elif artifact_id == f"IPIR-{source_id}":
+        kind = "compiled"
+    else:
+        return None
+    try:
+        return ArtifactKey(user.tenant_id, "sources", source_id, kind, artifact_id)
+    except ArtifactPathError:
+        return None
+
+
+def source_accessible(source_id: str, user: AuthenticatedUser) -> bool:
+    """Bundled demo package ids and registered connector ids are shared read-only
+    fixtures. An uploaded source (`SRC-…`) is accessible only if its raw artifact
+    exists under the caller's OWN tenant prefix — ownership is structural, so it
+    holds across API/worker instances and cannot be forged with another tenant's id."""
+    if not source_id.startswith(_UPLOADED_SOURCE_PREFIX):
+        return True
+    key = _artifact_key(user, source_id, source_id)
+    return key is not None and get_artifact_store().exists(key)
 
 
 def _validation_error_detail(exc: ValidationError) -> dict[str, Any]:
@@ -27,7 +66,11 @@ def _validation_error_detail(exc: ValidationError) -> dict[str, Any]:
 
 
 @router.post("")
-async def upload_pricing_source(file: UploadFile = File(...)) -> dict[str, Any]:
+async def upload_pricing_source(
+    file: UploadFile = File(...),
+    user: AuthenticatedUser = Depends(require_source_write),
+    _quota: None = Depends(rate_limited("source_upload")),
+) -> dict[str, Any]:
     """Uploads and registers a pricing source file (.json only today --
     Excel/PDF are not yet supported for verified, content-faithful
     extraction)."""
@@ -37,6 +80,8 @@ async def upload_pricing_source(file: UploadFile = File(...)) -> dict[str, Any]:
             filename=file.filename or "uploaded_source",
             content_type=file.content_type or "application/octet-stream",
             content=content,
+            metadata={"tenant_id": user.tenant_id, "uploaded_by": user.uid},
+            tenant_id=user.tenant_id,
         )
         _registered_sources[descriptor.source_id] = descriptor
         return {
@@ -59,9 +104,15 @@ async def upload_pricing_source(file: UploadFile = File(...)) -> dict[str, Any]:
 
 
 @router.post("/{source_id}/compile")
-def compile_pricing_source(source_id: str) -> dict[str, Any]:
+def compile_pricing_source(
+    source_id: str,
+    user: AuthenticatedUser = Depends(require_source_write),
+    _quota: None = Depends(rate_limited("source_compile")),
+) -> dict[str, Any]:
     """Compiles a registered source into a canonical IPIR package using its matching adapter."""
     desc = _registered_sources.get(source_id)
+    if desc is not None and not is_visible_to((desc.metadata or {}).get("tenant_id"), user):
+        desc = None
     if not desc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -69,7 +120,7 @@ def compile_pricing_source(source_id: str) -> dict[str, Any]:
         )
 
     try:
-        res = ingestion_service.compile_source(desc)
+        res = ingestion_service.compile_source(desc, tenant_id=user.tenant_id)
         pkg = res.ipir_package
         # Compilation receipt: the concrete, auditable evidence of what was
         # actually parsed out of the uploaded source, so a user never has to
@@ -127,3 +178,53 @@ def compile_pricing_source(source_id: str) -> dict[str, Any]:
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Source compilation failed: {e}",
         ) from e
+
+
+@router.get("/{source_id}")
+def get_pricing_source(source_id: str, user: AuthenticatedUser = Depends(require_read)) -> dict[str, Any]:
+    """Safe source metadata within the caller's tenant. Never returns the
+    storage URI or any artifact bytes."""
+    desc = _registered_sources.get(source_id)
+    if desc is None or not is_visible_to((desc.metadata or {}).get("tenant_id"), user):
+        raise not_found("Registered source", source_id)
+    return {
+        "source_id": desc.source_id,
+        "name": desc.name,
+        "source_type": desc.source_type.value,
+        "format": desc.format,
+        "sha256": (desc.metadata or {}).get("sha256"),
+        "tenant_id": (desc.metadata or {}).get("tenant_id"),
+        "artifact_ids": [desc.source_id, f"IPIR-{desc.source_id}"],
+    }
+
+
+@router.get("/{source_id}/artifacts/{artifact_id}")
+def download_source_artifact(
+    source_id: str,
+    artifact_id: str,
+    user: AuthenticatedUser = Depends(require_source_download),
+    _quota: None = Depends(rate_limited("source_download")),
+) -> Response:
+    """Authorized, tenant-scoped download of a source's raw or compiled artifact."""
+    desc = _registered_sources.get(source_id)
+    if desc is None or not is_visible_to((desc.metadata or {}).get("tenant_id"), user):
+        raise not_found("Registered source", source_id)
+    key = _artifact_key(user, source_id, artifact_id)
+    if key is None:
+        raise not_found("Artifact", artifact_id)
+    # Tenant ownership is enforced by the key itself: the object is looked up
+    # under the caller's tenant prefix, so another tenant's artifact is absent.
+    store = get_artifact_store()
+    content = store.get_artifact_content(key)
+    art = store.get_descriptor(key)
+    if content is None or art is None:
+        raise not_found("Artifact", artifact_id)
+    return Response(
+        content=content,
+        media_type="application/octet-stream",
+        headers={
+            "Content-Disposition": f'attachment; filename="{artifact_id}"',
+            "X-Content-Type-Options": "nosniff",
+            "Cache-Control": "no-store",
+        },
+    )

@@ -16,6 +16,7 @@ from app.agents.config import AgentConfig
 from app.agents.decision_schemas import (
     DifferencePrioritizationDecision,
     EvidenceSufficiencyDecision,
+    ExplanationDraftDecision,
     PortfolioAnalysisDecision,
     RemediationProposalDecision,
     RemediationRevalidationSelectionDecision,
@@ -66,6 +67,15 @@ def _payload_for(schema: type, found_ids: list[str], mode: str) -> dict:
         if mode == "invalid_ids":
             return {**base, "targeted_test_ids": bogus, "regression_test_ids": bogus}
         return {**base, "targeted_test_ids": found_ids[:3], "regression_test_ids": found_ids[:1]}
+    if schema is ExplanationDraftDecision:
+        if mode == "unsupported_value":
+            return {**base, "draft_text": "Your premium changed by 999.00 due to your credit score."}
+        return {
+            **base,
+            "draft_text": (
+                "Your premium changed as reflected in the supplied facts, effective the stated date."
+            ),
+        }
     raise ValueError(f"no fake payload builder registered for schema {schema}")
 
 
@@ -87,7 +97,7 @@ class FakeGeminiClient:
             category = mode.split(":", 1)[1]
             evidence = GeminiInvocationEvidence(
                 invocation_id=f"GEM-FAKE-{len(self.calls)}",
-                model_id="gemini-3.7-flash",
+                model_id="gemini-3.1-flash-lite",
                 decision_type=decision_type,
                 started_at=now,
                 ended_at=now,
@@ -102,7 +112,7 @@ class FakeGeminiClient:
         decision = schema.model_validate(payload)
         evidence = GeminiInvocationEvidence(
             invocation_id=f"GEM-FAKE-{len(self.calls)}",
-            model_id="gemini-3.7-flash",
+            model_id="gemini-3.1-flash-lite",
             decision_type=decision_type,
             started_at=now,
             ended_at=now,
@@ -144,7 +154,7 @@ def test_valid_decision_applied_no_false_model_id_and_budget_respected():
     gemini_actions = [a for a in res.agent_execution.data if a.is_gemini_decision]
     assert gemini_actions, "expected at least one real Gemini decision to be applied"
     for a in gemini_actions:
-        assert a.model_id == "gemini-3.7-flash"
+        assert a.model_id == "gemini-3.1-flash-lite"
         assert a.invocation_id is not None
         assert a.is_fallback is False
 

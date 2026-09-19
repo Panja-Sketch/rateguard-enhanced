@@ -6,12 +6,17 @@ from typing import Any
 from app.adapters import AdapterResult, SourceDescriptor, SourceFormat
 from app.adapters.errors import SourceParsingError
 from app.agents.supervisor import AssuranceSupervisor
+from app.ingestion.workbook_v1.compiler import compile_workbook
 from app.ipir.enums import ProvenanceSourceType
 from app.ipir.provenance import Provenance, SourceReference
 from app.ipir.v0_2.compat import lower_to_v0_1
-from app.ingestion.workbook_v1.compiler import compile_workbook
 from app.storage import get_run_store
-from app.storage.artifacts import ArtifactCategory, ArtifactDescriptor, get_artifact_store
+from app.storage.artifacts import (
+    ArtifactCategory,
+    ArtifactDescriptor,
+    ArtifactKey,
+    get_artifact_store,
+)
 
 
 class PricingSourceIngestionService:
@@ -38,8 +43,13 @@ class PricingSourceIngestionService:
         content_type: str,
         content: bytes,
         metadata: dict[str, Any] | None = None,
+        *,
+        tenant_id: str,
     ) -> SourceDescriptor:
-        """Validates, stores, and registers a source file artifact."""
+        """Validates, stores, and registers a source file artifact under the
+        caller's tenant prefix. `tenant_id` must come from the authenticated
+        server context (never a request field) and is required: there is no
+        tenantless default."""
         if len(content) > 20 * 1024 * 1024:
             raise SourceParsingError("File size exceeds maximum allowed 20MB limit.")
 
@@ -85,6 +95,10 @@ class PricingSourceIngestionService:
 
         art_desc = ArtifactDescriptor(
             artifact_id=source_id,
+            tenant_id=tenant_id,
+            scope="sources",
+            scope_id=source_id,
+            kind="raw",
             category=cat,
             filename=filename,
             content_type=content_type or "application/octet-stream",
@@ -103,11 +117,12 @@ class PricingSourceIngestionService:
             metadata=full_metadata,
         )
 
-    def compile_source(self, source_descriptor: SourceDescriptor) -> AdapterResult:
+    def compile_source(self, source_descriptor: SourceDescriptor, *, tenant_id: str) -> AdapterResult:
         """Compiles registered source bytes to IPIR via the mandatory
         `AssuranceSupervisor.extract_and_compile_source` pipeline, then saves
         the compiled IPIR artifact."""
-        content = self.artifact_store.get_artifact_content(source_descriptor.source_id)
+        raw_key = ArtifactKey(tenant_id, "sources", source_descriptor.source_id, "raw", source_descriptor.source_id)
+        content = self.artifact_store.get_artifact_content(raw_key)
         if not content:
             raise SourceParsingError(
                 f"Artifact content for source '{source_descriptor.source_id}' not found."
@@ -138,6 +153,10 @@ class PricingSourceIngestionService:
         ipir_json = result.ipir_package.model_dump_json(indent=2).encode("utf-8")
         ipir_art = ArtifactDescriptor(
             artifact_id=f"IPIR-{source_descriptor.source_id}",
+            tenant_id=tenant_id,
+            scope="sources",
+            scope_id=source_descriptor.source_id,
+            kind="compiled",
             category=ArtifactCategory.IPIR_PACKAGE,
             filename=f"{result.ipir_package.id}.json",
             content_type="application/json",

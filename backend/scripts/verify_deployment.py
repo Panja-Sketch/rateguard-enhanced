@@ -36,7 +36,7 @@ import sys
 from dataclasses import dataclass
 
 KNOWN_BAD_GOOGLE_API_CORE_VERSION = "2.35.0"
-EXPECTED_GEMINI_MODEL = "gemini-3.7-flash"
+EXPECTED_GEMINI_MODEL = "gemini-3.1-flash-lite"
 EXPECTED_PUSH_ENDPOINT_SUFFIX = "/internal/pubsub/assurance"
 
 

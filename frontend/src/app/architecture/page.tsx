@@ -4,7 +4,7 @@ import { useEffect, useState } from 'react';
 import { Network, Database, Bot, Cpu, Lock, Server, ShieldCheck, ArrowDown } from 'lucide-react';
 import { fetchSystemInfo } from '@/lib/api/client';
 
-const DEFAULT_MODEL_LABEL = 'Gemini 3.7 Flash';
+const DEFAULT_MODEL_LABEL = 'Gemini 3.1 Flash-Lite';
 const DEFAULT_PROVIDER_LABEL = 'Google Vertex AI';
 const DEFAULT_FRAMEWORK_LABEL = 'Google GenAI SDK';
 const DEFAULT_SUPERVISOR_LABEL = 'Google GenAI SDK Structured-Decision Supervisor';

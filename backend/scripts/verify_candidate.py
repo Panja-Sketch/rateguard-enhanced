@@ -46,6 +46,7 @@ Usage:
 
 import argparse
 import json
+import os
 import sys
 import time
 import urllib.error
@@ -53,11 +54,11 @@ import urllib.request
 from dataclasses import dataclass, field
 from typing import Any
 
-EXPECTED_GEMINI_MODEL = "gemini-3.7-flash"
+EXPECTED_GEMINI_MODEL = "gemini-3.1-flash-lite"
 EXPECTED_FRAMEWORK_SUBSTRING = "Google GenAI SDK"
 EXPECTED_PROVIDER = "Google Vertex AI"
 EXPECTED_AUTH_MODE = "VERTEX_AI"
-EXPECTED_LOCATION = "global"
+EXPECTED_LOCATION = "us"
 DEMO_SOURCE_A = "AZ_HO3_2026_09"
 DEMO_SOURCE_B_DEFECTIVE = "AZ_HO3_2026_09_DEFECTIVE"
 
@@ -65,6 +66,13 @@ DEMO_SOURCE_B_DEFECTIVE = "AZ_HO3_2026_09_DEFECTIVE"
 # app.agents.gemini_client._SECRET_PATTERNS's intent (defense-in-depth, not a
 # guarantee) applied to the response body instead of log lines.
 _SECRET_LIKE_SUBSTRINGS = ("AIza", "ya29.", "-----BEGIN")
+
+
+def _auth_headers() -> dict[str, str]:
+    """Bearer header from RATEGUARD_ID_TOKEN (a Firebase ID token for the demo
+    ADMIN user, supplied via the environment -- never argv, never logged)."""
+    token = os.environ.get("RATEGUARD_ID_TOKEN", "").strip()
+    return {"Authorization": f"Bearer {token}"} if token else {}
 
 
 @dataclass
@@ -87,7 +95,9 @@ class Report:
 
 def _http(method: str, url: str, body: dict | None = None, timeout: float = 30.0) -> tuple[int, dict]:
     data = json.dumps(body).encode("utf-8") if body is not None else None
-    req = urllib.request.Request(url, data=data, method=method, headers={"Content-Type": "application/json"})
+    req = urllib.request.Request(
+        url, data=data, method=method, headers={"Content-Type": "application/json", **_auth_headers()}
+    )
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             raw = resp.read().decode("utf-8")
@@ -486,7 +496,7 @@ def check_sample_templates_served(report: Report, frontend_url: str) -> None:
 
     for path in _SAMPLE_TEMPLATE_PATHS:
         url = f"{frontend_url.rstrip('/')}{path}"
-        req = urllib.request.Request(url, method="GET")
+        req = urllib.request.Request(url, method="GET", headers=_auth_headers())
         try:
             with urllib.request.urlopen(req, timeout=15.0) as resp:
                 status_code = resp.status

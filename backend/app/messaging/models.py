@@ -12,11 +12,12 @@ class AssuranceJob(BaseModel):
     job_type: str = "ASSURANCE_MISSION_V2"
     schema_version: int = 2
     correlation_id: str | None = None
+    tenant_id: str | None = None
     created_at: str = Field(default_factory=lambda: datetime.now(UTC).isoformat())
     left_source_id: str | None = None
     right_source_id: str | None = None
     left_package_id: str | None = None
     right_package_id: str | None = None
     include_portfolio_analysis: bool = True
-    requested_model: str = "gemini-3.7-flash"
+    requested_model: str = "gemini-3.1-flash-lite"
     metadata: dict[str, Any] = Field(default_factory=dict)

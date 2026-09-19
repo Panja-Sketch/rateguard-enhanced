@@ -7,6 +7,12 @@ from app.storage.models import AssuranceRunRecord, AssuranceRunStatus, EvidenceR
 
 LEASE_TTL_SECONDS = 120
 
+# Hard ceiling for any tenant-scoped list query: no endpoint may scan an
+# unbounded collection, whatever limit/offset a client asks for.
+MAX_TENANT_LIST_RECORDS = 1000
+# Ceilings for per-run subcollections (events / evidence / explanations).
+MAX_SUBCOLLECTION_RECORDS = 5000
+
 
 class LeaseOutcome(StrEnum):
     """Result of attempting to acquire an execution lease for a run."""
@@ -55,6 +61,54 @@ class BaseRunStore(ABC):
     def list_runs(self, limit: int = 50) -> list[AssuranceRunRecord]:
         """Lists assurance runs sorted newest first (created_at descending)."""
         pass
+
+    # --- Tenant-scoped access (locked doc 4.1.A, 14.1) ----------------------------
+    # The API never uses the unscoped get/list/update/delete for user requests:
+    # these variants carry the caller's tenant into the storage layer. Firestore
+    # overrides them with `tenant_id` query predicates and transactional
+    # ownership checks; the defaults below give the in-memory store the same
+    # semantics. A record owned by another tenant is indistinguishable from a
+    # missing one (None / False). `include_legacy` is set only when the server
+    # explicitly assigned pre-tenant records to this caller's tenant.
+    @staticmethod
+    def owned_by(record: AssuranceRunRecord | None, tenant_id: str, include_legacy: bool = False) -> bool:
+        if record is None or not tenant_id:
+            return False
+        if record.tenant_id:
+            return record.tenant_id == tenant_id
+        return include_legacy
+
+    def get_run_for_tenant(
+        self, run_id: str, tenant_id: str, *, include_legacy: bool = False
+    ) -> AssuranceRunRecord | None:
+        record = self.get_run(run_id)
+        return record if self.owned_by(record, tenant_id, include_legacy) else None
+
+    def list_runs_for_tenant(
+        self, tenant_id: str, limit: int = 50, *, include_legacy: bool = False
+    ) -> list[AssuranceRunRecord]:
+        limit = max(1, min(limit, MAX_TENANT_LIST_RECORDS))
+        mine = [
+            r for r in self.list_runs(limit=MAX_TENANT_LIST_RECORDS) if self.owned_by(r, tenant_id, include_legacy)
+        ]
+        return mine[:limit]
+
+    def update_run_for_tenant(
+        self, record: AssuranceRunRecord, tenant_id: str, *, include_legacy: bool = False
+    ) -> AssuranceRunRecord | None:
+        """Persists `record` only if the stored document belongs to `tenant_id`.
+        The stored tenant is authoritative: a caller can never move a record
+        between tenants by changing `record.tenant_id`."""
+        existing = self.get_run(record.run_id)
+        if not self.owned_by(existing, tenant_id, include_legacy):
+            return None
+        record.tenant_id = existing.tenant_id
+        return self.update_run(record)
+
+    def delete_run_for_tenant(self, run_id: str, tenant_id: str, *, include_legacy: bool = False) -> bool:
+        if not self.owned_by(self.get_run(run_id), tenant_id, include_legacy):
+            return False
+        return self.delete_run(run_id)
 
     def update_run_status(
         self,
@@ -125,6 +179,24 @@ class BaseRunStore(ABC):
     def get_evidence(self, run_id: str) -> list[EvidenceRecord]:
         """Retrieves all evidence lineage records for a run."""
         pass
+
+    # --- Explanation review records (locked doc 14.1:
+    # missions/{mission_id}/explanations/{explanation_id}). Plain dicts (the
+    # typed model lives in app.explanations.review); the default here is a
+    # process-local map, overridden by the Firestore adapter to persist.
+    def save_explanation(self, mission_id: str, record: dict[str, Any]) -> dict[str, Any]:
+        bucket = self.__dict__.setdefault("_explanations_mem", {}).setdefault(mission_id, {})
+        bucket[record["explanation_id"]] = dict(record)
+        return record
+
+    def get_explanation(self, mission_id: str, explanation_id: str) -> dict[str, Any] | None:
+        found = self.__dict__.setdefault("_explanations_mem", {}).get(mission_id, {}).get(explanation_id)
+        return dict(found) if found is not None else None
+
+    def list_explanations(self, mission_id: str, tenant_id: str | None = None) -> list[dict[str, Any]]:
+        bucket = self.__dict__.setdefault("_explanations_mem", {}).get(mission_id, {})
+        rows = [dict(v) for v in bucket.values() if tenant_id is None or v.get("tenant_id") == tenant_id]
+        return rows[:MAX_SUBCOLLECTION_RECORDS]
 
     def acquire_lease(
         self, run_id: str, job_id: str, lease_seconds: int = LEASE_TTL_SECONDS

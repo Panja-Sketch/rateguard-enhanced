@@ -70,6 +70,13 @@ class AssuranceRunRecord(BaseModel):
     """Persistence record for a complete assurance run state."""
 
     run_id: str
+    # Tenant ownership (locked doc 4.1.A/14.1). Always derived server-side from
+    # the authenticated user's `users/{uid}` record, never from a request body.
+    # `None` marks a pre-tenant legacy record: hidden from every user unless the
+    # server explicitly assigns legacy records to a tenant
+    # (Settings.legacy_record_tenant_id) -- see app.auth.tenancy.
+    tenant_id: str | None = None
+    created_by: str | None = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     status: AssuranceRunStatus = AssuranceRunStatus.QUEUED

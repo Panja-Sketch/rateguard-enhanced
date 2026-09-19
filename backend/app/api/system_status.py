@@ -1,4 +1,4 @@
-"""Detailed operational diagnostics for authorized operational use.
+"""Detailed operational diagnostics -- ADMIN role only.
 
 Unlike /health/live and /health/ready (fast, unauthenticated-safe probes), this
 endpoint reports richer configuration/diagnostic detail intended for operators
@@ -10,15 +10,16 @@ exposes secret values, service account keys, or auth headers.
 
 from typing import Any
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 
+from app.auth import AuthenticatedUser, require_admin
 from app.core.config import get_settings
 
 router = APIRouter(prefix="/api/v1/system", tags=["system-status"])
 
 
 @router.get("/status")
-def get_system_status() -> dict[str, Any]:
+def get_system_status(user: AuthenticatedUser = Depends(require_admin)) -> dict[str, Any]:
     """Detailed dependency diagnostics: Firestore, Pub/Sub configuration, worker
     heartbeat (per-mission, not a global signal - see note below), Gemini
     configuration (model id only, no invocation), BigQuery, and GCS. No secret

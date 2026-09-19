@@ -90,7 +90,7 @@ def test_gemini_model_id_wrong_value_fails() -> None:
 
 
 def test_gemini_model_id_correct_value_passes() -> None:
-    fake_config = MagicMock(gemini_model="gemini-3.7-flash")
+    fake_config = MagicMock(gemini_model="gemini-3.1-flash-lite")
     with patch("app.agents.config.get_agent_config", return_value=fake_config):
         result = vd.check_gemini_model_id()
     assert result.passed is True

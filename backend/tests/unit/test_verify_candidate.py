@@ -22,11 +22,11 @@ import verify_candidate as vc  # noqa: E402
 
 VALID_GEMINI_BODY = {
     "gemini": {
-        "configured_model_id": "gemini-3.7-flash",
+        "configured_model_id": "gemini-3.1-flash-lite",
         "provider": "Google Vertex AI",
         "framework": "Google GenAI SDK (google-genai structured output)",
         "auth_mode": "VERTEX_AI",
-        "configured_location": "global",
+        "configured_location": "us",
         "agent_enabled": True,
         "endpoint_probe_invoked": False,
         "note": "Configuration only.",
@@ -51,7 +51,7 @@ def test_system_status_check_fails_on_stale_deployment_region_as_location():
     general Cloud Run/GCP deployment region ('us-central1') as the Gemini
     location, and omitting provider/auth_mode/framework entirely, is
     exactly the pre-fix response shape and must fail the verifier."""
-    body = {"gemini": {"configured_model_id": "gemini-3.7-flash", "location": "us-central1", "invoked": False}}
+    body = {"gemini": {"configured_model_id": "gemini-3.1-flash-lite", "location": "us-central1", "invoked": False}}
     report = _report_with_status(body)
     assert report.checks[-1].passed is False
 

@@ -6,6 +6,7 @@ import {
   ValidationIssue,
   WorkflowEvent,
 } from '../types/assurance';
+import { getAuthToken, notifyUnauthorized } from '../auth/session';
 
 const BASE_URL =
   process.env.NEXT_PUBLIC_RATEGUARD_API_URL || 'http://localhost:8000';
@@ -22,6 +23,36 @@ export class ApiError extends Error {
     this.code = code;
     this.issues = issues;
   }
+}
+
+/**
+ * fetch() with the caller's Firebase ID token attached as `Authorization:
+ * Bearer …` (never in the URL). On a 401 the token is force-refreshed once and
+ * the request retried — a token can expire between the SDK cache check and the
+ * server check. A second 401 means the session is genuinely over: the provider
+ * is notified (sign-out + redirect to /login). A 403 is NOT retried and does
+ * NOT sign the user out — it is a permission decision, surfaced by
+ * handleResponse as a normal ApiError.
+ */
+export async function authFetch(url: string, init: RequestInit = {}): Promise<Response> {
+  const send = async (forceRefresh: boolean): Promise<Response> => {
+    const token = await getAuthToken(forceRefresh);
+    if (!token) {
+      throw new ApiError('You are signed out. Please sign in again.', 401, 'AUTHENTICATION_REQUIRED');
+    }
+    const headers = new Headers(init.headers);
+    headers.set('Authorization', `Bearer ${token}`);
+    return fetch(url, { ...init, headers });
+  };
+
+  let res = await send(false);
+  if (res.status === 401) {
+    res = await send(true);
+    if (res.status === 401) {
+      notifyUnauthorized();
+    }
+  }
+  return res;
 }
 
 async function handleResponse<T>(res: Response): Promise<T> {
@@ -46,6 +77,18 @@ async function handleResponse<T>(res: Response): Promise<T> {
       }
     } catch {
       // Ignore non-JSON body errors
+    }
+    if (res.status === 401) {
+      // Fixed, safe text: never echo anything the server or a token contained.
+      throw new ApiError('Your session has expired. Please sign in again.', 401, code ?? 'AUTHENTICATION_REQUIRED');
+    }
+    if (res.status === 429) {
+      const retryAfter = Number(res.headers.get('Retry-After'));
+      const wait = Number.isFinite(retryAfter) && retryAfter > 0 ? ` Try again in about ${Math.ceil(retryAfter / 60) > 1 ? `${Math.ceil(retryAfter / 60)} minutes` : `${Math.ceil(retryAfter)} seconds`}.` : ' Please try again later.';
+      throw new ApiError(`You have made too many requests.${wait}`, 429, code ?? 'RATE_LIMITED');
+    }
+    if (res.status === 403) {
+      throw new ApiError('You do not have permission to perform this action.', 403, code ?? 'FORBIDDEN');
     }
     throw new ApiError(errorDetail, res.status, code, issues);
   }
@@ -101,7 +144,7 @@ export async function createAssuranceMission(params: {
   decision: string;
   result: Record<string, unknown>;
 }> {
-  const res = await fetch(`${BASE_URL}/api/v1/missions`, {
+  const res = await authFetch(`${BASE_URL}/api/v1/missions`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(params),
@@ -126,14 +169,14 @@ export async function listAssuranceMissions(
   if (filters?.decision) params.append('decision', filters.decision);
   if (filters?.includeDemoSamples) params.append('include_demo_samples', 'true');
 
-  const res = await fetch(`${BASE_URL}/api/v1/missions?${params.toString()}`, {
+  const res = await authFetch(`${BASE_URL}/api/v1/missions?${params.toString()}`, {
     cache: 'no-store',
   });
   return handleResponse(res);
 }
 
 export async function getAssuranceMission(missionId: string): Promise<AssuranceMissionDetail> {
-  const res = await fetch(`${BASE_URL}/api/v1/missions/${missionId}`, {
+  const res = await authFetch(`${BASE_URL}/api/v1/missions/${missionId}`, {
     cache: 'no-store',
   });
   return handleResponse<AssuranceMissionDetail>(res);
@@ -144,7 +187,7 @@ export async function archiveAssuranceMission(missionId: string): Promise<{
   status: string;
   message: string;
 }> {
-  const res = await fetch(`${BASE_URL}/api/v1/missions/${missionId}/archive`, {
+  const res = await authFetch(`${BASE_URL}/api/v1/missions/${missionId}/archive`, {
     method: 'POST',
     cache: 'no-store',
   });
@@ -156,7 +199,7 @@ export async function deleteAssuranceMission(missionId: string): Promise<{
   status: string;
   message: string;
 }> {
-  const res = await fetch(`${BASE_URL}/api/v1/missions/${missionId}`, {
+  const res = await authFetch(`${BASE_URL}/api/v1/missions/${missionId}`, {
     method: 'DELETE',
     cache: 'no-store',
   });
@@ -169,7 +212,7 @@ export async function cancelAssuranceMission(missionId: string): Promise<{
   cancellation_requested?: boolean;
   message: string;
 }> {
-  const res = await fetch(`${BASE_URL}/api/v1/missions/${missionId}/cancel`, {
+  const res = await authFetch(`${BASE_URL}/api/v1/missions/${missionId}/cancel`, {
     method: 'POST',
     cache: 'no-store',
   });
@@ -182,7 +225,7 @@ export async function retryAssuranceMission(missionId: string): Promise<{
   attempt_number: number;
   message: string;
 }> {
-  const res = await fetch(`${BASE_URL}/api/v1/missions/${missionId}/retry`, {
+  const res = await authFetch(`${BASE_URL}/api/v1/missions/${missionId}/retry`, {
     method: 'POST',
     cache: 'no-store',
   });
@@ -220,7 +263,7 @@ export async function generateAlignmentOptions(
   missionId: string,
   reference: 'A' | 'B'
 ): Promise<AlignmentOptionsResult> {
-  const res = await fetch(`${BASE_URL}/api/v1/missions/${missionId}/alignment-options`, {
+  const res = await authFetch(`${BASE_URL}/api/v1/missions/${missionId}/alignment-options`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ reference }),
@@ -238,7 +281,7 @@ export async function fetchSystemInfo(): Promise<{
   ipir_version: string;
   cloud_project: string;
 }> {
-  const res = await fetch(`${BASE_URL}/api/v1/system/info`, { cache: 'no-store' });
+  const res = await authFetch(`${BASE_URL}/api/v1/system/info`, { cache: 'no-store' });
   return handleResponse(res);
 }
 
@@ -247,7 +290,7 @@ export async function getAssuranceRunEvents(runId: string): Promise<{
   event_count: number;
   events: WorkflowEvent[];
 }> {
-  const res = await fetch(`${BASE_URL}/api/v1/assurance/runs/${runId}/events`, {
+  const res = await authFetch(`${BASE_URL}/api/v1/assurance/runs/${runId}/events`, {
     cache: 'no-store',
   });
   return handleResponse<{ run_id: string; event_count: number; events: WorkflowEvent[] }>(res);
@@ -258,7 +301,7 @@ export async function getAssuranceRunEvidence(runId: string): Promise<{
   evidence_count: number;
   evidence: EvidenceRecord[];
 }> {
-  const res = await fetch(`${BASE_URL}/api/v1/assurance/runs/${runId}/evidence`, {
+  const res = await authFetch(`${BASE_URL}/api/v1/assurance/runs/${runId}/evidence`, {
     cache: 'no-store',
   });
   return handleResponse<{ run_id: string; evidence_count: number; evidence: EvidenceRecord[] }>(res);
@@ -268,7 +311,7 @@ export async function uploadSourceFile(file: File): Promise<SourceDescriptor> {
   const formData = new FormData();
   formData.append('file', file);
 
-  const res = await fetch(`${BASE_URL}/api/v1/sources`, {
+  const res = await authFetch(`${BASE_URL}/api/v1/sources`, {
     method: 'POST',
     body: formData,
     cache: 'no-store',
@@ -334,7 +377,7 @@ export async function compileSource(sourceId: string): Promise<{
   workbook_compilation_receipt: WorkbookCompilationReceipt | null;
   ipir_package: unknown;
 }> {
-  const res = await fetch(`${BASE_URL}/api/v1/sources/${sourceId}/compile`, {
+  const res = await authFetch(`${BASE_URL}/api/v1/sources/${sourceId}/compile`, {
     method: 'POST',
     cache: 'no-store',
   });
@@ -352,7 +395,7 @@ export interface ConnectorMetadata {
 }
 
 export async function listConnectors(): Promise<ConnectorMetadata[]> {
-  const res = await fetch(`${BASE_URL}/api/v1/connectors`, { cache: 'no-store' });
+  const res = await authFetch(`${BASE_URL}/api/v1/connectors`, { cache: 'no-store' });
   return handleResponse<ConnectorMetadata[]>(res);
 }
 
@@ -374,8 +417,22 @@ export async function getConnectorEvidence(missionId: string): Promise<{
   connector_invocation_count: number;
   connector_invocations: ConnectorInvocationEvidence[];
 }> {
-  const res = await fetch(`${BASE_URL}/api/v1/missions/${missionId}/connector-evidence`, {
+  const res = await authFetch(`${BASE_URL}/api/v1/missions/${missionId}/connector-evidence`, {
     cache: 'no-store',
   });
   return handleResponse(res);
+}
+
+export interface SessionInfo {
+  uid: string;
+  email: string | null;
+  tenant_id: string;
+  role: 'ADMIN' | 'RELEASE_OWNER' | 'CONSUMER_REVIEWER' | 'VIEWER';
+}
+
+/** The server's view of who the caller is. For display and navigation only —
+ * every request is re-authorized on the server. */
+export async function fetchSession(): Promise<SessionInfo> {
+  const res = await authFetch(`${BASE_URL}/api/v1/me`, { cache: 'no-store' });
+  return handleResponse<SessionInfo>(res);
 }

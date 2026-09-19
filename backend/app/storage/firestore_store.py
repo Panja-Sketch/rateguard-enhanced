@@ -6,7 +6,13 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from app.storage.interfaces import LEASE_TTL_SECONDS, BaseRunStore, LeaseOutcome
+from app.storage.interfaces import (
+    LEASE_TTL_SECONDS,
+    MAX_SUBCOLLECTION_RECORDS,
+    MAX_TENANT_LIST_RECORDS,
+    BaseRunStore,
+    LeaseOutcome,
+)
 from app.storage.memory_store import InMemoryRunStore
 from app.storage.models import AssuranceRunRecord, AssuranceRunStatus, EvidenceRecord, RunEvent
 
@@ -155,6 +161,115 @@ class FirestoreRunStore(BaseRunStore):
                     raise
         return self._fallback_store.list_runs(limit)
 
+    # --- Tenant-scoped, database-level access ------------------------------------
+    # Every query carries a `tenant_id ==` predicate (served by the composite index
+    # in infrastructure/firestore.indexes.json), so another tenant's documents are
+    # never read into the process, never counted, and never returned. Writes and
+    # deletes verify ownership inside a transaction.
+    def _tenant_query(self, tenant_id: str | None, limit: int) -> Any:
+        from google.cloud import firestore
+        from google.cloud.firestore_v1.base_query import FieldFilter
+
+        return (
+            self._db.collection(self.collection_name)
+            .where(filter=FieldFilter("tenant_id", "==", tenant_id))
+            .order_by("created_at", direction=firestore.Query.DESCENDING)
+            .limit(limit)
+        )
+
+    def get_run_for_tenant(
+        self, run_id: str, tenant_id: str, *, include_legacy: bool = False
+    ) -> AssuranceRunRecord | None:
+        record = self.get_run(run_id)  # direct document read by id (no scan)
+        return record if self.owned_by(record, tenant_id, include_legacy) else None
+
+    def list_runs_for_tenant(
+        self, tenant_id: str, limit: int = 50, *, include_legacy: bool = False
+    ) -> list[AssuranceRunRecord]:
+        limit = max(1, min(limit, MAX_TENANT_LIST_RECORDS))
+        if self._db is None:
+            return super().list_runs_for_tenant(tenant_id, limit, include_legacy=include_legacy)
+        try:
+            runs = [AssuranceRunRecord.model_validate(d.to_dict()) for d in self._tenant_query(tenant_id, limit).stream()]
+            if include_legacy:
+                # Legacy documents written with an explicit null tenant_id.
+                runs += [
+                    AssuranceRunRecord.model_validate(d.to_dict()) for d in self._tenant_query(None, limit).stream()
+                ]
+                runs.sort(key=lambda r: r.created_at, reverse=True)
+            return runs[:limit]
+        except Exception as e:
+            logger.error("Firestore error in list_runs_for_tenant: %s", type(e).__name__)
+            if not self.fallback_on_error:
+                raise
+            return self._fallback_store.list_runs_for_tenant(tenant_id, limit, include_legacy=include_legacy)
+
+    def update_run_for_tenant(
+        self, record: AssuranceRunRecord, tenant_id: str, *, include_legacy: bool = False
+    ) -> AssuranceRunRecord | None:
+        if self._db is None:
+            return super().update_run_for_tenant(record, tenant_id, include_legacy=include_legacy)
+        from google.cloud import firestore
+
+        doc_ref = self._db.collection(self.collection_name).document(record.run_id)
+
+        @firestore.transactional
+        def _txn(transaction: Any) -> AssuranceRunRecord | None:
+            snap = doc_ref.get(transaction=transaction)
+            if not snap.exists:
+                return None
+            existing = AssuranceRunRecord.model_validate(snap.to_dict())
+            if not self.owned_by(existing, tenant_id, include_legacy):
+                return None
+            record.tenant_id = existing.tenant_id  # stored tenant is authoritative
+            payload = sanitize_for_firestore(record.model_dump(mode="json"))
+            transaction.set(doc_ref, payload, merge=True)
+            return record
+
+        try:
+            saved = _txn(self._db.transaction())
+        except Exception as e:
+            logger.error("Firestore error in update_run_for_tenant: %s", type(e).__name__)
+            if not self.fallback_on_error:
+                raise
+            return None
+        if saved is not None:
+            self._fallback_store.update_run(saved)
+        return saved
+
+    def delete_run_for_tenant(self, run_id: str, tenant_id: str, *, include_legacy: bool = False) -> bool:
+        if self._db is None:
+            return super().delete_run_for_tenant(run_id, tenant_id, include_legacy=include_legacy)
+        from google.cloud import firestore
+
+        doc_ref = self._db.collection(self.collection_name).document(run_id)
+
+        @firestore.transactional
+        def _txn(transaction: Any) -> bool:
+            snap = doc_ref.get(transaction=transaction)
+            if not snap.exists:
+                return False
+            existing = AssuranceRunRecord.model_validate(snap.to_dict())
+            if not self.owned_by(existing, tenant_id, include_legacy):
+                return False
+            transaction.delete(doc_ref)  # ownership verified in the same transaction
+            return True
+
+        try:
+            if not _txn(self._db.transaction()):
+                return False
+            # Subcollections are removed only after the ownership-checked delete succeeded.
+            for sub_name in ("events", "evidence", "explanations"):
+                for sub_doc in doc_ref.collection(sub_name).stream():
+                    sub_doc.reference.delete()
+            self._fallback_store.delete_run(run_id)
+            return not doc_ref.get().exists
+        except Exception as e:
+            logger.error("Firestore error in delete_run_for_tenant: %s", type(e).__name__)
+            if not self.fallback_on_error:
+                raise
+            return False
+
     def add_event(self, run_id: str, event: RunEvent) -> RunEvent:
         self._fallback_store.add_event(run_id, event)
         if self._db is not None:
@@ -179,7 +294,7 @@ class FirestoreRunStore(BaseRunStore):
                 col_ref = (
                     self._db.collection(self.collection_name).document(run_id).collection("events")
                 )
-                docs = col_ref.stream()
+                docs = col_ref.limit(MAX_SUBCOLLECTION_RECORDS).stream()
                 events = [RunEvent.model_validate(doc.to_dict()) for doc in docs]
                 if events:
                     return events
@@ -213,7 +328,7 @@ class FirestoreRunStore(BaseRunStore):
                 col_ref = (
                     self._db.collection(self.collection_name).document(run_id).collection("evidence")
                 )
-                docs = col_ref.stream()
+                docs = col_ref.limit(MAX_SUBCOLLECTION_RECORDS).stream()
                 evidence_list = [EvidenceRecord.model_validate(doc.to_dict()) for doc in docs]
                 if evidence_list:
                     return evidence_list
@@ -222,6 +337,58 @@ class FirestoreRunStore(BaseRunStore):
                 if not self.fallback_on_error:
                     raise
         return self._fallback_store.get_evidence(run_id)
+
+    def save_explanation(self, mission_id: str, record: dict[str, Any]) -> dict[str, Any]:
+        super().save_explanation(mission_id, record)
+        if self._db is not None:
+            try:
+                (
+                    self._db.collection(self.collection_name)
+                    .document(mission_id)
+                    .collection("explanations")
+                    .document(record["explanation_id"])
+                    .set(sanitize_for_firestore(record))
+                )
+            except Exception as e:
+                logger.error("Firestore error in save_explanation: %s", type(e).__name__)
+                if not self.fallback_on_error:
+                    raise
+        return record
+
+    def get_explanation(self, mission_id: str, explanation_id: str) -> dict[str, Any] | None:
+        if self._db is not None:
+            try:
+                snap = (
+                    self._db.collection(self.collection_name)
+                    .document(mission_id)
+                    .collection("explanations")
+                    .document(explanation_id)
+                    .get()
+                )
+                if snap.exists:
+                    return snap.to_dict()
+            except Exception as e:
+                logger.error("Firestore error in get_explanation: %s", type(e).__name__)
+                if not self.fallback_on_error:
+                    raise
+        return super().get_explanation(mission_id, explanation_id)
+
+    def list_explanations(self, mission_id: str, tenant_id: str | None = None) -> list[dict[str, Any]]:
+        if self._db is not None:
+            try:
+                from google.cloud.firestore_v1.base_query import FieldFilter
+
+                col = self._db.collection(self.collection_name).document(mission_id).collection("explanations")
+                if tenant_id is not None:
+                    col = col.where(filter=FieldFilter("tenant_id", "==", tenant_id))
+                docs = [d.to_dict() for d in col.limit(MAX_SUBCOLLECTION_RECORDS).stream()]
+                if docs:
+                    return docs
+            except Exception as e:
+                logger.error("Firestore error in list_explanations: %s", type(e).__name__)
+                if not self.fallback_on_error:
+                    raise
+        return super().list_explanations(mission_id, tenant_id)
 
     def delete_run(self, run_id: str) -> bool:
         """Permanently deletes the Firestore document (and its events/evidence
@@ -237,7 +404,7 @@ class FirestoreRunStore(BaseRunStore):
                 return False
             # Firestore does not cascade-delete subcollections; clean them up
             # explicitly since these records are only ever disposable/eligible-demo.
-            for sub_name in ("events", "evidence"):
+            for sub_name in ("events", "evidence", "explanations"):
                 for sub_doc in doc_ref.collection(sub_name).stream():
                     sub_doc.reference.delete()
             doc_ref.delete()

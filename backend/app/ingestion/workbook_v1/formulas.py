@@ -23,6 +23,7 @@ import re
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
+from app.ingestion.workbook_v1.errors import WorkbookErrorDetail, WorkbookRejectionError
 from app.ipir.v0_2.common import ID_PATTERN_V2
 from app.ipir.v0_2.expressions import (
     ComparisonConditionV2,
@@ -32,7 +33,6 @@ from app.ipir.v0_2.expressions import (
     LogicalConditionV2,
     ReferenceExpression,
 )
-from app.ingestion.workbook_v1.errors import WorkbookErrorDetail, WorkbookRejectionError
 
 # Locked doc section 5.2: the entire supported operator/condition vocabulary.
 ALLOWED_CALCULATION_OPERATORS = {

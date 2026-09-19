@@ -23,7 +23,7 @@ From there, a bounded, structured Gemini supervisor and a suite of deterministic
 
 ## Agentic Gemini Workflow
 
-RateGuard runs a mandatory deterministic evidence pipeline unconditionally (validation → IPIR comparison → dependency impact → boundary-test generation → premium oracle → target execution → trace reconciliation), and consults **Gemini 3.7 Flash** (via the Google GenAI SDK against Vertex AI) at a small, bounded set of structured decision points inside `AssuranceSupervisor`. There are seven distinct decision-point *kinds* in the code; which ones actually fire depends on what a given mission finds:
+RateGuard runs a mandatory deterministic evidence pipeline unconditionally (validation → IPIR comparison → dependency impact → boundary-test generation → premium oracle → target execution → trace reconciliation), and consults **Gemini 3.1 Flash-Lite** (via the Google GenAI SDK against Vertex AI) at a small, bounded set of structured decision points inside `AssuranceSupervisor`. There are seven distinct decision-point *kinds* in the code; which ones actually fire depends on what a given mission finds:
 
 | Decision point | What Gemini decides | Fires when |
 | :--- | :--- | :--- |
@@ -52,7 +52,7 @@ flowchart TB
     Topic[["Pub/Sub topic<br/>assurance-runs"]]
     Worker["Worker<br/>(Cloud Run: rateguard-worker, private)"]
     Supervisor["AssuranceSupervisor<br/>(Google GenAI SDK)"]
-    Gemini(("Gemini 3.7 Flash<br/>Vertex AI"))
+    Gemini(("Gemini 3.1 Flash-Lite<br/>Vertex AI"))
     Engines["Deterministic Engines<br/>AST Diff · Dependency DAG · Premium Oracle<br/>Test Generator · Reconciliation · Portfolio SQL"]
     Firestore[("Firestore<br/>mission/run state")]
     BigQuery[("BigQuery<br/>50K-policy portfolio")]
@@ -183,7 +183,7 @@ This is the architectural guarantee the whole system is built around: **Gemini r
 | Service | Role |
 | :--- | :--- |
 | **Cloud Run** | Hosts the public API (`rateguard-api`), the private worker (`rateguard-worker`, no public ingress), and the web frontend (`rateguard-web`) |
-| **Vertex AI (Gemini 3.7 Flash)** | Structured-decision reasoning via the Google GenAI SDK, authenticated via the runtime service account (no API key) |
+| **Vertex AI (Gemini 3.1 Flash-Lite)** | Structured-decision reasoning via the Google GenAI SDK, authenticated via the runtime service account (no API key) |
 | **Cloud Pub/Sub** | Durable async job queue between the API and worker, with a bounded retry policy and a dead-letter topic/subscription for poison messages |
 | **Firestore** | Mission/run state, per-stage event log, and evidence records |
 | **BigQuery** | The 50,000-synthetic-policy portfolio dataset and blast-radius exposure queries |

@@ -1,9 +1,11 @@
+import logging
 from typing import Any
 
 from fastapi import APIRouter, Response, status
 
 from app.core.config import get_settings
 
+logger = logging.getLogger(__name__)
 router = APIRouter(tags=["Health"])
 
 
@@ -75,7 +77,10 @@ def _check_run_store() -> dict[str, Any]:
         store.list_runs(limit=1)
         return {"status": "ok", "backend": store_kind}
     except Exception as e:
-        return {"status": "degraded", "detail": f"Run store check failed: {e}"}
+        # Exception text can carry project ids, resource paths or credentials
+        # hints -- log it server-side, return only a fixed, safe reason.
+        logger.warning("READINESS_RUN_STORE_CHECK_FAILED error_type=%s", type(e).__name__)
+        return {"status": "degraded", "detail": "Run store check failed."}
 
 
 def _check_message_queue(settings: Any) -> dict[str, Any]:
@@ -92,11 +97,7 @@ def _check_message_queue(settings: Any) -> dict[str, Any]:
         from app.messaging import get_message_publisher
 
         publisher = get_message_publisher()
-        return {
-            "status": "ok",
-            "backend": type(publisher).__name__,
-            "topic": settings.pubsub_topic,
-            "subscription": settings.pubsub_subscription,
-        }
+        return {"status": "ok", "backend": type(publisher).__name__}
     except Exception as e:
-        return {"status": "degraded", "detail": f"Message publisher construction failed: {e}"}
+        logger.warning("READINESS_MESSAGE_QUEUE_CHECK_FAILED error_type=%s", type(e).__name__)
+        return {"status": "degraded", "detail": "Message publisher construction failed."}

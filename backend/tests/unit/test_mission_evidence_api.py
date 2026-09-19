@@ -25,7 +25,7 @@ def _seed_mission_with_gemini_evidence(mission_id: str, *, sensitive_extra: dict
 
     data_summary = {
         "invocation_id": "GEM-ABC12345",
-        "model_id": "gemini-3.7-flash",
+        "model_id": "gemini-3.1-flash-lite",
         "auth_mode": "VERTEX_AI",
         "response_id": "resp-xyz-789",
         "prompt_version": "assurance-supervisor-v1",
@@ -83,7 +83,7 @@ def test_evidence_endpoint_returns_whitelisted_fields_only() -> None:
     assert body["gemini_invocation_count"] == 1
     invocation = body["gemini_invocations"][0]
 
-    assert invocation["model_id"] == "gemini-3.7-flash"
+    assert invocation["model_id"] == "gemini-3.1-flash-lite"
     assert invocation["invocation_id"] == "GEM-ABC12345"
     assert invocation["response_id"] == "resp-xyz-789"
     assert invocation["decision_type"] == "PRIORITIZE_DIFFERENCES"

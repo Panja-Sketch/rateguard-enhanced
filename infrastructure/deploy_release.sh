@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# DEPRECATED / WRONG PROJECT for RateGuard Enhanced: PROJECT_ID below is
+# "rateguard-ai". Not used this session -- see infrastructure/deploy_candidate_enhanced.sh.
+#
 # RateGuard AI -- Production-Configured Release Revisions (0% traffic)
 #
 # Creates NEW rateguard-api / rateguard-worker / rateguard-web revisions,

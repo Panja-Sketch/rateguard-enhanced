@@ -3,9 +3,9 @@
 This script is NEVER executed by pytest — it lives outside `tests/`, and
 `pyproject.toml` scopes pytest discovery to `testpaths = ["tests"]`, so pytest
 never even collects this file. It makes exactly ONE real Gemini API call using
-whatever credentials are already configured in the environment (Vertex AI via
-`GOOGLE_GENAI_USE_VERTEXAI=true` + Application Default Credentials, or an API
-key via `GOOGLE_API_KEY`/`GEMINI_API_KEY`) through the same GeminiDecisionClient
+the Vertex AI configuration already in the environment (`GOOGLE_GENAI_USE_VERTEXAI=true`,
+`VERTEX_AI_LOCATION=us`, `RATEGUARD_GEMINI_MODEL=gemini-3.1-flash-lite`, Application
+Default Credentials; API keys are forbidden and never read) through the same GeminiDecisionClient
 the production supervisor uses — nothing here is a separate code path.
 
 Usage (requires explicit opt-in — the script refuses to run without it):
@@ -22,7 +22,7 @@ actually works, so a silent fallback must never be reported as success.
 Never prints the prompt/system-instruction text (it's synthetic and
 non-sensitive here, but the point of this script is to prove wiring, not to
 double as a prompt-inspection tool) and never prints a credential value —
-only an `auth_mode` label ("VERTEX_AI" / "API_KEY" / "NONE").
+only an `auth_mode` label ("VERTEX_AI" / "NONE").
 """
 
 import argparse
@@ -64,9 +64,8 @@ def main() -> int:
     auth_mode, _ = client._resolve_auth_mode()
     if auth_mode == AUTH_MODE_NONE:
         print(
-            "Refusing to run: no live credentials configured. Set GOOGLE_API_KEY / "
-            "GEMINI_API_KEY, or GOOGLE_GENAI_USE_VERTEXAI=true with Application "
-            "Default Credentials configured."
+            "Refusing to run: Vertex AI is not configured. Set GOOGLE_GENAI_USE_VERTEXAI=true "
+            "with Application Default Credentials configured (API keys are not supported)."
         )
         return 2
 

@@ -4,7 +4,17 @@
 import argparse
 import sys
 import time
+import os
+
 import httpx
+
+
+def _auth_headers() -> dict[str, str]:
+    """Bearer header from RATEGUARD_ID_TOKEN (Firebase ID token of the demo
+    ADMIN user, provided via the environment -- never argv, never logged)."""
+    token = os.environ.get("RATEGUARD_ID_TOKEN", "").strip()
+    return {"Authorization": f"Bearer {token}"} if token else {}
+
 
 
 def poll_mission_until_terminal(
@@ -28,7 +38,7 @@ def poll_mission_until_terminal(
     while time.time() - start_time < timeout_seconds:
         poll_count += 1
         try:
-            r = httpx.get(f"{base_url}/api/v1/missions/{mission_id}", timeout=10.0)
+            r = httpx.get(f"{base_url}/api/v1/missions/{mission_id}", headers=_auth_headers(), timeout=10.0)
             last_http_status = r.status_code
 
             if r.status_code == 404:
@@ -107,12 +117,12 @@ def run_smoke_tests(base_url: str) -> bool:
 
     # 2. System Info Probe
     try:
-        r = httpx.get(f"{base_url}/api/v1/system/info", timeout=10.0)
+        r = httpx.get(f"{base_url}/api/v1/system/info", headers=_auth_headers(), timeout=10.0)
         if r.status_code == 200:
-            model_id = r.json().get("configured_model", "")
+            model_id = r.json().get("gemini_model", "")
             print(f"  [✓] /api/v1/system/info returned 200 OK (Model: {model_id})")
-            if model_id != "gemini-3.7-flash":
-                print(f"  [✗] Configured model is '{model_id}', expected 'gemini-3.7-flash'")
+            if model_id != "gemini-3.1-flash-lite":
+                print(f"  [✗] Configured model is '{model_id}', expected 'gemini-3.1-flash-lite'")
                 success = False
         else:
             print(f"  [✗] /api/v1/system/info returned {r.status_code}")
@@ -123,7 +133,7 @@ def run_smoke_tests(base_url: str) -> bool:
 
     # 3. List Missions
     try:
-        r = httpx.get(f"{base_url}/api/v1/missions?limit=5", timeout=10.0)
+        r = httpx.get(f"{base_url}/api/v1/missions?limit=5", headers=_auth_headers(), timeout=10.0)
         if r.status_code == 200:
             print("  [✓] /api/v1/missions returned 200 OK")
         else:
@@ -154,7 +164,7 @@ def run_full_tests(base_url: str, timeout_seconds: float = 300.0, poll_interval:
             "source_b": {"source_id": "AZ_HO3_2026_09_CLEAN", "source_type": "SAMPLE_RELEASE", "name": "Clean Target"},
             "disposable_sample_run": True,
         }
-        r = httpx.post(f"{base_url}/api/v1/missions", json=clean_req, timeout=10.0)
+        r = httpx.post(f"{base_url}/api/v1/missions", json=clean_req, headers=_auth_headers(), timeout=10.0)
         if r.status_code in (200, 202):
             m_id = r.json()["mission_id"]
             print(f"  [✓] Clean mission accepted HTTP 202 (Mission ID: {m_id}). Polling completion...")
@@ -183,7 +193,7 @@ def run_full_tests(base_url: str, timeout_seconds: float = 300.0, poll_interval:
             "source_b": {"source_id": "AZ_HO3_2026_09_DEFECTIVE", "source_type": "SAMPLE_RELEASE", "name": "Defective Target"},
             "disposable_sample_run": True,
         }
-        r = httpx.post(f"{base_url}/api/v1/missions", json=block_req, timeout=10.0)
+        r = httpx.post(f"{base_url}/api/v1/missions", json=block_req, headers=_auth_headers(), timeout=10.0)
         if r.status_code in (200, 202):
             m_id = r.json()["mission_id"]
             print(f"  [✓] Defective mission accepted HTTP 202 (Mission ID: {m_id}). Polling completion...")
@@ -220,7 +230,7 @@ def run_full_tests(base_url: str, timeout_seconds: float = 300.0, poll_interval:
         }
         decisions: dict[str, str | None] = {}
         for label, req in (("A->B", equiv_req_ab), ("B->A", equiv_req_ba)):
-            r = httpx.post(f"{base_url}/api/v1/missions", json=req, timeout=10.0)
+            r = httpx.post(f"{base_url}/api/v1/missions", json=req, headers=_auth_headers(), timeout=10.0)
             if r.status_code not in (200, 202):
                 print(f"  [✗] Equivalence {label} submission returned HTTP {r.status_code}: {r.text[:150]}")
                 success = False

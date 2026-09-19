@@ -66,6 +66,20 @@ class PortfolioAnalysisDecision(GeminiDecisionBase):
     should_run_portfolio: bool
 
 
+class ExplanationDraftDecision(GeminiDecisionBase):
+    """Bounded plain-language consumer-explanation draft (locked doc section
+    10.1 step 2). Gemini receives only the deterministic ExplanationFacts
+    object and must cite nothing else; the supervisor independently
+    validates every amount/date the returned `draft_text` contains against
+    those facts and discards+falls back to a deterministic template on any
+    unsupported value (locked doc section 10.1) -- this schema does not by
+    itself guarantee that, it only bounds the shape of what Gemini returns.
+    """
+
+    decision_type: Literal["EXPLANATION_DRAFT"] = "EXPLANATION_DRAFT"
+    draft_text: str = Field(min_length=1, max_length=1200)
+
+
 class RemediationProposalDecision(GeminiDecisionBase):
     """Selects which confirmed findings a remediation candidate should correct.
 

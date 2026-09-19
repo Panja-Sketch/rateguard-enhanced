@@ -1,4 +1,10 @@
 #!/usr/bin/env bash
+# DEPRECATED / WRONG PROJECT for RateGuard Enhanced: PROJECT_ID below is
+# "rateguard-ai". Default (no-flag) mode is a safe, zero-gcloud plan printer;
+# not used for the "rateguard-enhanced" candidate this session builds --
+# this session does not promote (no-promotion is an explicit task
+# requirement).
+#
 # RateGuard AI -- Production Promotion Plan (prepared, NOT executed by default)
 #
 # Promotes an already-verified candidate image digest to production traffic

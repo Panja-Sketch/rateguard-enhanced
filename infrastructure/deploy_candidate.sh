@@ -1,4 +1,12 @@
 #!/usr/bin/env bash
+# DEPRECATED / WRONG PROJECT for RateGuard Enhanced: this script's
+# PROJECT_ID below is "rateguard-ai" -- the old project, which must never be
+# touched by RateGuard Enhanced work. Its default (no-flag) mode is already
+# a safe, zero-gcloud-call plan printer, so it is left otherwise intact for
+# historical/test reference, but use infrastructure/deploy_candidate_enhanced.sh
+# for the authorized "rateguard-enhanced" project instead. If this script is
+# ever invoked with --deploy-candidate, verify the target project first.
+#
 # RateGuard AI -- Isolated Candidate/Staging Deployment
 #
 # Builds ONE immutable backend image (tagged with the current git commit SHA,
@@ -157,8 +165,8 @@ Candidate env vars (non-secret; no API key is ever set):
   RATEGUARD_AGENT_ENABLED=true
   GOOGLE_GENAI_USE_VERTEXAI=true
   GOOGLE_CLOUD_PROJECT=${PROJECT_ID}
-  GOOGLE_CLOUD_LOCATION=global
-  RATEGUARD_GEMINI_MODEL=gemini-3.7-flash
+  GOOGLE_CLOUD_LOCATION=us
+  RATEGUARD_GEMINI_MODEL=gemini-3.1-flash-lite
   RATEGUARD_RUN_STORE=firestore
   RATEGUARD_FIRESTORE_COLLECTION=${STAGING_FIRESTORE_COLLECTION}
   RATEGUARD_PUBSUB_TOPIC=${STAGING_TOPIC}
@@ -260,8 +268,8 @@ write_candidate_env_file() {
 RATEGUARD_AGENT_ENABLED: "true"
 GOOGLE_GENAI_USE_VERTEXAI: "true"
 GOOGLE_CLOUD_PROJECT: "${PROJECT_ID}"
-GOOGLE_CLOUD_LOCATION: "global"
-RATEGUARD_GEMINI_MODEL: "gemini-3.7-flash"
+GOOGLE_CLOUD_LOCATION: "us"
+RATEGUARD_GEMINI_MODEL: "gemini-3.1-flash-lite"
 RATEGUARD_RUN_STORE: "firestore"
 RATEGUARD_PUBSUB_TOPIC: "${STAGING_TOPIC}"
 RATEGUARD_PUBSUB_SUBSCRIPTION: "${STAGING_SUBSCRIPTION}"

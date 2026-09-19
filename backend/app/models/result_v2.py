@@ -3,6 +3,8 @@ from typing import Any, TypeVar
 
 from pydantic import BaseModel, Field
 
+from app.engines.portfolio.consumer_protection import CohortDistributionResult, PipelineImpactResult
+from app.explanations.models import ExplanationDraft, ExplanationFacts
 from app.models.mission import (
     AgentAction,
     BlastRadiusResult,
@@ -72,7 +74,7 @@ class AssuranceResultV2(BaseModel):
     overall_status: str  # QUEUED, RUNNING, COMPLETED, FAILED, NEEDS_REVIEW
     ai_runtime: dict[str, str] = Field(
         default_factory=lambda: {
-            "model_id": "gemini-3.7-flash",
+            "model_id": "gemini-3.1-flash-lite",
             # Names the framework that actually executes structured decisions
             # (google-genai structured function-calling). Must never say "Google
             # ADK" unless the deployed execution path genuinely runs through it.
@@ -101,6 +103,18 @@ class AssuranceResultV2(BaseModel):
         default_factory=lambda: SectionResult(status=AnalysisStatus.NOT_RUN)
     )
     blast_radius: SectionResult[BlastRadiusResult] = Field(
+        default_factory=lambda: SectionResult(status=AnalysisStatus.NOT_RUN)
+    )
+    cohort_distribution: SectionResult[CohortDistributionResult] = Field(
+        default_factory=lambda: SectionResult(status=AnalysisStatus.NOT_RUN)
+    )
+    pipeline_impact: SectionResult[PipelineImpactResult] = Field(
+        default_factory=lambda: SectionResult(status=AnalysisStatus.NOT_RUN)
+    )
+    explanation_facts: SectionResult[ExplanationFacts] = Field(
+        default_factory=lambda: SectionResult(status=AnalysisStatus.NOT_RUN)
+    )
+    explanation_draft: SectionResult[ExplanationDraft] = Field(
         default_factory=lambda: SectionResult(status=AnalysisStatus.NOT_RUN)
     )
     remediation: SectionResult[RemediationProposal] = Field(

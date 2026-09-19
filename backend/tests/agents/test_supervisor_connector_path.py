@@ -13,11 +13,9 @@ failure category must never produce PASS.
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import httpx
-import pytest
 
 from app.agents.supervisor import AssuranceSupervisor
 from app.connectors.client import ConnectorClient

@@ -243,3 +243,38 @@ Command: `cd backend && python -m pytest -q`
 - **`missions/new/page.tsx` was not modified** — the connector picker and workbook upload were added to `sources/page.tsx` instead (which already had the more complete dual-source upload/compile/launch flow); `missions/new` remains the bundled-demo-sample wizard, unchanged.
 - **`POST /connectors/{id}/test` admin route remains unbuilt** (D7's own deferral, confirmed still out of scope — no requirement in this session needed it).
 - **Cross-tenant/cross-user access tests were not added** — grep found no tenant/auth-scoping concept enforced anywhere in this codebase's mission/source access paths today (single-tenant demo scope, per the locked doc's own MVP framing). This is a genuine, pre-existing gap, not something this session introduced or silently worked around.
+
+## Session 5 — Authentication, authorization, tenant scoping, runtime config (pre-candidate gate)
+
+**Scope:** code, tests and deployment *configuration* only. Nothing deployed, committed or pushed; no secret deleted; locked doc untouched. Design and rationale: `DECISIONS.md` D9. Route matrix, tenant/legacy policy, worker boundary: `docs/security/AUTHORIZATION_MATRIX.md`. Deployed checklist: `docs/demo/DEPLOYED_ACCEPTANCE_TEST.md` ("AUTH").
+
+Delivered: canonical `RATEGUARD_GEMINI_MODEL=gemini-3.1-flash-lite` / `VERTEX_AI_LOCATION=us` with fail-fast startup validation; API-key path removed from the Gemini client; Firebase Admin token verification via ADC (no private key); roles/tenants from `users/{uid}`; explicit per-route role matrix; tenant stamping and scoping (cross-tenant = 404); legacy records hidden by default; API/worker route separation (`RATEGUARD_SERVICE_ROLE`); explicit CORS, request-size limit, sanitized health; new routes (`/me`, source metadata/download, evidence bundle download, connector test, explanation review); `scripts/bootstrap_user.py`; frontend Firebase login/AuthProvider/AuthGate/authFetch/role-aware nav; deploy script, env files, web build args, `firestore.rules`.
+
+### Verified results
+- Backend full suite (`cd backend && python -m pytest -q`): **878 passed, 1 failed** in 19m07s. The one failure (`test_stage_recorder_wiring::…material_drift…`) was caused by earlier sessions' uncommitted supervisor work (explanation/pipeline stages now built, test still asserted "not built"); the assertion was corrected and the file re-run: passing. A later re-run of the auth/config/sources/stage tests together: 275 passed. The full 19-minute suite was not re-run end-to-end after that last test edit and after a `sources.py` fix (restored `_validation_error_detail`, caught by ruff; covered by `test_sources_api`).
+- New backend tests: `tests/auth/*` (real-JWT Firebase verifier, authentication, 25-route × 4-role matrix, tenant isolation, worker boundary, CORS/size/health, bootstrap) and `tests/unit/test_runtime_config.py`.
+- Frontend: `npm run typecheck` clean; `npm run lint` clean; `npx jest` 58 passed (6 suites); `npm run build` succeeds; `npx playwright test` 7 passed (real Next.js app in Chrome, Firebase Auth REST + API intercepted — not live Firebase).
+- Ruff on all new/changed auth files: clean (17 pre-existing findings elsewhere untouched).
+
+### Known limits
+See D9 "Not done, by design" and AUTHORIZATION_MATRIX §3–5: no rate limiting, no in-app Pub/Sub OIDC verification, tenant-list scan window, GCS paths not tenant-prefixed, Firestore rules file not published, live Firebase/browser acceptance still to be run on the deployed candidate.
+
+
+## Session 6 — Release-gap closure (guardrails, tenant-prefixed artifacts, database-level tenancy, rate limiting, rules validation)
+
+**Scope:** code, tests, documentation and deployment *configuration*. Nothing deployed, committed, pushed or published; no cloud resource or secret touched; locked doc untouched. Rationale: `DECISIONS.md` D10. Policy detail: `docs/security/AUTHORIZATION_MATRIX.md` §3, §6, §7.
+
+### Verified results (final worktree, run after the last code change)
+- **Backend full suite** with a real Firestore emulator and `RATEGUARD_REQUIRE_EMULATOR=1` (`backend/scripts/test_with_emulator.sh`): **1027 passed, 0 failed, 0 skipped**, 16m19s. This includes the workbook-security, connector contract/SSRF, authentication/RBAC/tenant, artifact-isolation, guardrail, rate-limit (incl. 16-thread concurrency on Firestore) and evidence tests.
+- **Ruff** (`app tests scripts`): all checks passed. No type checker (mypy/pyright) is configured in this repository, so none was run.
+- **Firestore rules emulator suite** (`infrastructure/firestore-rules-tests`): **114 passed**. Negative control (permissive rules): 43 failed, confirming the tests detect leaks. Rules were **not** published.
+- **Frontend:** typecheck clean; lint clean; Jest **59 passed** (6 suites); production build compiled; Playwright **7 passed**.
+
+### Session-6 findings fixed along the way
+- Rate-limit counter ids joined identity fields with `|`: two different identities could collide (caught by a new test; now JSON-encoded before hashing).
+- Local artifact store wrote to `base_dir/<upload filename>` (path traversal); paths are now derived only from a validated `ArtifactKey`.
+- Guardrail variables were never read by runtime code (module constants); now canonical `RATEGUARD_*` variables.
+- Ruff `--fix` also normalized import order in a few previously-modified files and removed 2 unused variables; no behaviour change.
+
+### Known limits (unchanged unless stated)
+Indexes/TTL/rules are not applied (manual, reviewed step); Firestore documents lacking `tenant_id` entirely are hidden from lists (see matrix §3.4); no edge rate limiting for unauthenticated floods; in-app Pub/Sub OIDC verification not implemented; Playwright uses intercepted Firebase/API, not live services; the live deployed AUTH checklist (A-1 to A-20) is still to be run.

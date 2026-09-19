@@ -1,0 +1,55 @@
+# RateGuard Enhanced -- non-secret runtime environment (production-shape
+# baseline). Candidate deployments (infrastructure/deploy_candidate_enhanced.sh)
+# override the staging-scoped keys (RATEGUARD_FIRESTORE_COLLECTION,
+# RATEGUARD_PUBSUB_TOPIC/SUBSCRIPTION, RATEGUARD_BIGQUERY_DATASET,
+# RATEGUARD_GCS_BUCKET, RATEGUARD_CORS_ORIGINS) at deploy time; this file is
+# the base for a future real production cutover, once this candidate is
+# promoted (out of scope for this session -- see docs/operations/ROLLBACK_RUNBOOK.md
+# and docs/demo/CANDIDATE_DEPLOYMENT_MANIFEST.md).
+RATEGUARD_GOOGLE_CLOUD_PROJECT: "rateguard-enhanced"
+RATEGUARD_GOOGLE_CLOUD_REGION: "us-central1"
+RATEGUARD_GCS_BUCKET: "rateguard-enhanced-artifacts"
+RATEGUARD_FIRESTORE_DATABASE: "(default)"
+RATEGUARD_RUN_STORE: "firestore"
+RATEGUARD_ARTIFACT_STORE: "gcs"
+RATEGUARD_BIGQUERY_ENABLED: "true"
+RATEGUARD_BIGQUERY_DATASET: "rateguard"
+RATEGUARD_BIGQUERY_PORTFOLIO_TABLE: "synthetic_policies"
+RATEGUARD_BIGQUERY_RESULTS_TABLE: "portfolio_exposure_results"
+RATEGUARD_ASYNC_ENABLED: "true"
+RATEGUARD_EXECUTION_MODE: "pubsub"
+RATEGUARD_PUBSUB_TOPIC: "assurance-runs"
+RATEGUARD_PUBSUB_SUBSCRIPTION: "assurance-worker"
+# Locked model ID (docs/architecture/RATEGUARD_LOCKED_SOURCE_OF_TRUTH.md
+# section 11.1). Never gemini-2.0-flash-001 (discontinued) or any other model.
+RATEGUARD_GEMINI_MODEL: "gemini-3.1-flash-lite"
+# Single canonical location variable (locked doc section 11.1). The app FAILS
+# STARTUP on any other value; GOOGLE_CLOUD_LOCATION must match if present.
+VERTEX_AI_LOCATION: "us"
+RATEGUARD_DATA_DIR: "/app/data"
+RATEGUARD_CORS_ORIGINS: '["http://localhost:3000"]'
+# Vertex AI via ADC (the attached service account) -- no GEMINI_API_KEY /
+# GOOGLE_API_KEY anywhere, ever, per locked doc section 11.2.
+RATEGUARD_AGENT_ENABLED: "true"
+# Operational guardrails (validated at startup): Gemini call cap per mission,
+# adaptive probe-round cap, extraction confidence below which review is forced.
+RATEGUARD_MAX_GEMINI_CALLS_PER_MISSION: "6"
+RATEGUARD_MAX_PROBE_ROUNDS: "1"
+RATEGUARD_LOW_CONFIDENCE_REVIEW_THRESHOLD: "0.60"
+GOOGLE_GENAI_USE_VERTEXAI: "true"
+GOOGLE_CLOUD_PROJECT: "rateguard-enhanced"
+GOOGLE_CLOUD_LOCATION: "us"
+
+# Distributed rate limiting (challenge defaults; Firestore-backed counters,
+# TTL on rate_limits.expires_at -- see infrastructure/firestore.indexes.json).
+RATEGUARD_RATE_LIMIT_ENABLED: "true"
+RATEGUARD_RATE_LIMITS: '{"connector_test":"5/3600","mission_create":"10/3600","source_upload":"30/3600","source_compile":"30/3600","explanation_create":"20/3600","evidence_download":"30/3600","source_download":"60/3600"}'
+
+# Authentication (locked doc 4.1.A / 15.2). Public Firebase project id; token
+# verification uses ADC only -- there is no Firebase private-key secret and no
+# Secret Manager mapping for one.
+RATEGUARD_FIREBASE_PROJECT_ID: "rateguard-enhanced"
+RATEGUARD_ENVIRONMENT: "production"
+# RATEGUARD_SERVICE_ROLE is set per service by the deploy script (api | worker).
+# RATEGUARD_LEGACY_RECORD_TENANT_ID is intentionally NOT set: pre-tenant records
+# stay hidden from every user until an operator opts in.

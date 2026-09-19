@@ -32,10 +32,10 @@ from __future__ import annotations
 import base64
 import json
 from pathlib import Path
+from unittest.mock import patch
 
 import httpx
 from fastapi.testclient import TestClient
-from unittest.mock import patch
 
 from app.connectors.client import ConnectorClient
 from app.engines.testing.models import PricingTestPlan, PricingTestScenario, ScenarioClassification

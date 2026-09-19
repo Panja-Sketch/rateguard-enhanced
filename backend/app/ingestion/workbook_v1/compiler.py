@@ -9,7 +9,6 @@ from __future__ import annotations
 import hashlib
 from datetime import UTC, datetime
 
-from app.ipir.v0_2.compat import run_control_cases
 from app.ingestion.workbook_v1 import mapping
 from app.ingestion.workbook_v1.errors import WorkbookRejectionError
 from app.ingestion.workbook_v1.formulas import scan_cell_for_unsupported_formula
@@ -23,6 +22,7 @@ from app.ingestion.workbook_v1.sheets import (
     validate_required_sheets_and_columns,
 )
 from app.ingestion.workbook_v1.zip_safety import validate_archive_safety, validate_upload_basics
+from app.ipir.v0_2.compat import run_control_cases
 
 
 def _scan_all_required_sheets_for_unsupported_formulas(wb, sheets_present: list[str]) -> None:

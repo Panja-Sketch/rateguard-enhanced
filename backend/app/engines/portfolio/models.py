@@ -71,6 +71,10 @@ class PortfolioExposureResult(BaseModel):
     issue_breakdown: list[DefectExposure] = Field(default_factory=list)
     performance_telemetry: dict[str, Any] = Field(default_factory=dict)
     metadata: dict[str, Any] = Field(default_factory=dict)
+    # Consumer-protection analytics (locked doc section 9), computed from the
+    # same per-policy repricing pass above -- see app.engines.portfolio.consumer_protection.
+    cohort_distribution: Any = None
+    pipeline_impact: Any = None
 
     @property
     def undercharged_count(self) -> int:

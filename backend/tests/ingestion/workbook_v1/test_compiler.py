@@ -9,7 +9,6 @@ from app.ingestion.workbook_v1.compiler import compile_workbook
 
 from .conftest import negative_sample
 
-
 # ---------------------------------------------------------------------------
 # Positive / golden cases (locked doc section 17.1 bullets 1-2)
 # ---------------------------------------------------------------------------

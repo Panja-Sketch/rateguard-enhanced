@@ -1,10 +1,16 @@
 import logging
 import os
 import time
+from datetime import date
 from decimal import Decimal
 
 from app.engines.diff import compare_packages
 from app.engines.impact import ImpactAnalyzer
+from app.engines.portfolio.consumer_protection import (
+    PolicyImpactRecord,
+    compute_cohort_distribution,
+    compute_pipeline_impact,
+)
 from app.engines.portfolio.models import DefectExposure, PortfolioExposureResult, SyntheticPolicy
 from app.engines.portfolio.predicate_evaluator import matches_predicate
 from app.engines.portfolio.repricing import reprice_policy
@@ -87,6 +93,7 @@ class PortfolioAnalyzer:
         }
 
         pol_dict = {p.policy_id: p for p in policies}
+        impact_by_policy: dict[str, PolicyImpactRecord] = {}
 
         for pid in exposed_policy_ids:
             pol = pol_dict[pid]
@@ -130,6 +137,9 @@ class PortfolioAnalyzer:
                     issue_stats[pred_id]["signed_var"] += var
 
                 policy_issue_matches[pid] = matched_preds
+                impact_by_policy[pid] = PolicyImpactRecord(
+                    policy_id=pid, signed_variance=var, absolute_variance=abs_v
+                )
 
         fin_count = len(financial_affected_ids)
         beh_count = len(behavioral_affected_ids)
@@ -177,6 +187,17 @@ class PortfolioAnalyzer:
             end_mem - start_mem,
         )
 
+        cohort_distribution = compute_cohort_distribution(
+            policies=policies,
+            impact_by_policy=impact_by_policy,
+            exposed_policy_ids=exposed_policy_ids,
+        )
+        pipeline_impact = compute_pipeline_impact(
+            policies=policies,
+            impact_by_policy=impact_by_policy,
+            as_of=date.today(),
+        )
+
         return PortfolioExposureResult(
             portfolio_id="AZ_HO3_2026_SYNTHETIC_50K",
             total_policies=total_policies,
@@ -204,4 +225,6 @@ class PortfolioAnalyzer:
                 "policies_per_second": pol_per_sec,
                 "policies_repriced": repriced_count,
             },
+            cohort_distribution=cohort_distribution,
+            pipeline_impact=pipeline_impact,
         )

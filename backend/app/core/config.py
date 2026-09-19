@@ -49,6 +49,38 @@ class Settings(BaseSettings):
     rating_engine_connector_auth_header_name: str | None = None
     rating_engine_connector_auth_token_env_var: str | None = None
 
+    # Which routes this process serves. The API and worker share one image
+    # (locked doc 12.1) but must not share a surface: `api` serves the
+    # Firebase-authenticated business API and NOT the internal Pub/Sub route;
+    # `worker` serves only the Pub/Sub route (+ health); `all` (default, local
+    # dev/tests) serves both.
+    service_role: str = "all"
+
+    # Authentication / authorization (locked doc 4.1.A, 15.2). The Firebase
+    # project id is public configuration, not a secret; token verification
+    # itself uses Application Default Credentials only.
+    firebase_project_id: str = ""
+    # Optional revocation check (needs roles/firebaseauth.viewer on the runtime
+    # service account). Off by default; `users/{uid}.disabled` is the
+    # server-side kill switch that never needs extra IAM.
+    firebase_check_revoked: bool = False
+    # Single-tenant challenge deployment: the tenant the bootstrap script
+    # assigns by default. Server-controlled configuration only -- never read
+    # from a request.
+    challenge_tenant_id: str = "rateguard-demo"
+    # Explicit migration switch for pre-tenant ("legacy") run records. Unset
+    # (default) = legacy records are hidden from every user. Set to a tenant id
+    # = legacy records are treated as belonging to that tenant.
+    legacy_record_tenant_id: str | None = None
+    # Distributed rate limiting (locked doc 15.2). Firestore-backed fixed window per
+    # tenant + uid + operation; overrides look like {"mission_create": "10/3600"}
+    # (limit/window_seconds). Defaults: app/ratelimit/policy.py.
+    rate_limit_enabled: bool = True
+    rate_limits: dict[str, str] = {}
+    # Upper bound on any request body (uploads are separately capped by the
+    # ingestion service); rejected with 413 before the body is fully buffered.
+    max_request_bytes: int = 25 * 1024 * 1024
+
     model_config = SettingsConfigDict(
         env_prefix="RATEGUARD_",
         env_file=".env",

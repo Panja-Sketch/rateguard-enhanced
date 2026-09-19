@@ -1,0 +1,16 @@
+steps:
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'build'
+      - '-f'
+      - 'backend/rating_engine/Dockerfile'
+      - '-t'
+      - 'us-central1-docker.pkg.dev/${PROJECT_ID}/rateguard-images/rateguard-rating-engine:${_IMAGE_TAG}'
+      - '.'
+images:
+  - 'us-central1-docker.pkg.dev/${PROJECT_ID}/rateguard-images/rateguard-rating-engine:${_IMAGE_TAG}'
+substitutions:
+  # No default production tag exists for this service yet (CP11 was never
+  # executed) -- every build of this image must pass an explicit immutable
+  # tag (the git commit SHA), never 'latest'.
+  _IMAGE_TAG: 'untagged'

@@ -11,7 +11,12 @@ from typing import Any
 
 from app.adapters.extractor_registry import EXTRACTOR_REGISTRY, excel_layout_recognized
 from app.adapters.models import AdapterResult, SourceDescriptor, SourceFormat
-from app.agents.config import get_agent_config
+from app.agents.config import (
+    DEFAULT_LOW_CONFIDENCE_REVIEW_THRESHOLD,
+    DEFAULT_MAX_GEMINI_CALLS_PER_MISSION,
+    DEFAULT_MAX_PROBE_ROUNDS,
+    get_agent_config,
+)
 from app.agents.decision_schemas import (
     MAX_ADDITIONAL_PROBE_TESTS,
     MAX_REGRESSION_TESTS,
@@ -19,6 +24,7 @@ from app.agents.decision_schemas import (
     AlignmentOptionsDecision,
     DifferencePrioritizationDecision,
     EvidenceSufficiencyDecision,
+    ExplanationDraftDecision,
     ExtractionStrategyDecision,
     GeminiDecisionBase,
     PortfolioAnalysisDecision,
@@ -40,6 +46,7 @@ from app.engines.portfolio import PortfolioExposureAnalyzer
 from app.engines.reconciliation import PricingReconciliationEngine
 from app.engines.testing import RiskDirectedTestGenerator
 from app.engines.testing.models import PricingTestScenario, ScenarioClassification
+from app.explanations import build_explanation_draft, build_explanation_facts
 from app.ipir.package import IPIRPackage
 from app.ipir.schema import validate_ipir_schema
 from app.models import (
@@ -76,13 +83,16 @@ AI_RUNTIME_LIVE_STATUS = "GEMINI_LIVE_DECISIONS_APPLIED"
 AI_RUNTIME_FALLBACK_STATUS = "DETERMINISTIC_FALLBACK_GEMINI_UNAVAILABLE"
 
 # Bounded adaptive-investigation budgets (see class docstring).
-MAX_GEMINI_CALLS_PER_MISSION = 6
-MAX_PROBE_ROUNDS = 1
+# Defaults only: the effective limits are read from AgentConfig
+# (RATEGUARD_MAX_GEMINI_CALLS_PER_MISSION / RATEGUARD_MAX_PROBE_ROUNDS /
+# RATEGUARD_LOW_CONFIDENCE_REVIEW_THRESHOLD) when a supervisor is constructed.
+MAX_GEMINI_CALLS_PER_MISSION = DEFAULT_MAX_GEMINI_CALLS_PER_MISSION
+MAX_PROBE_ROUNDS = DEFAULT_MAX_PROBE_ROUNDS
 
 # Below this confidence, an extraction result always requires human review
 # regardless of which extractor (deterministic, Gemini-selected, or fallback)
 # produced it.
-LOW_CONFIDENCE_REVIEW_THRESHOLD = 0.60
+LOW_CONFIDENCE_REVIEW_THRESHOLD = DEFAULT_LOW_CONFIDENCE_REVIEW_THRESHOLD
 
 
 @dataclass
@@ -130,7 +140,8 @@ class AssuranceSupervisor:
         self.reconciliation_engine = PricingReconciliationEngine()
         self.portfolio_analyzer = PortfolioExposureAnalyzer()
         self.remediation_service = RemediationService()
-        self.gemini = gemini_client if gemini_client is not None else GeminiDecisionClient(get_agent_config())
+        self.agent_config = get_agent_config()
+        self.gemini = gemini_client if gemini_client is not None else GeminiDecisionClient(self.agent_config)
         # Injectable for tests — e.g. a ConnectorClient(transport=httpx.ASGITransport(...))
         # wrapping the real rating_engine app, or a fake client for failure-mode tests.
         # Production code never overrides this; the default constructs a real client.
@@ -241,7 +252,7 @@ class AssuranceSupervisor:
         made. `decision` is None whenever the call failed or was skipped —
         callers MUST apply their own deterministic fallback in that case.
         """
-        if budget.gemini_call_count >= MAX_GEMINI_CALLS_PER_MISSION:
+        if budget.gemini_call_count >= self.agent_config.max_gemini_calls_per_mission:
             self.store.log_event(
                 run_id,
                 stage=decision_type,
@@ -349,7 +360,7 @@ class AssuranceSupervisor:
             result.requires_human_review = True
             result.warnings.extend(f"Schema validation issue: {issue}" for issue in schema_issues)
 
-        if result.confidence < LOW_CONFIDENCE_REVIEW_THRESHOLD:
+        if result.confidence < self.agent_config.low_confidence_review_threshold:
             result.requires_human_review = True
 
         location_ref = None
@@ -486,7 +497,7 @@ class AssuranceSupervisor:
             mode=mission.mode.value,
             overall_status="RUNNING",
             ai_runtime={
-                "model_id": "gemini-3.7-flash",
+                "model_id": get_agent_config().gemini_model,
                 "framework": "Google GenAI SDK (google-genai structured output)",
                 "model_status": AI_RUNTIME_NOT_INVOKED_STATUS,
             },
@@ -1213,10 +1224,10 @@ class AssuranceSupervisor:
         # re-executes a scenario id already run in this mission.
         probe_round = 0
         while (
-            probe_round < MAX_PROBE_ROUNDS
+            probe_round < self.agent_config.max_probe_rounds
             and mismatch_count > 0
             and test_plan is not None
-            and budget.gemini_call_count < MAX_GEMINI_CALLS_PER_MISSION
+            and budget.gemini_call_count < self.agent_config.max_gemini_calls_per_mission
         ):
             if self._is_cancelled(mission.mission_id, cancellation_check):
                 return self._finalize_cancelled(mission, result, agent_actions, recorder)
@@ -1436,6 +1447,7 @@ class AssuranceSupervisor:
         # STAGE 6: Portfolio Blast Radius & Measured Telemetry
         self._mark_stage(mission.mission_id, "PORTFOLIO_ANALYSIS")
         port_start = time.time()
+        raw_port = None
 
         # Real Gemini decision point: justify whether the costly 50K-policy scan
         # is warranted. Only consulted when zero mismatches were reproduced — a
@@ -1539,25 +1551,114 @@ class AssuranceSupervisor:
                 ),
             )
 
-        # Consumer-protection modules not built in this codebase (genuinely
-        # out of scope for this session, not a skipped-but-available
-        # feature) — always NOT_APPLICABLE, never fabricated.
-        recorder.record(
-            MissionStage.COHORT_DISTRIBUTION, StageStatus.NOT_APPLICABLE,
-            reason="Consumer cohort-distribution analysis is not built in this codebase; out of scope for this session.",
-        )
-        recorder.record(
-            MissionStage.PIPELINE_IMPACT, StageStatus.NOT_APPLICABLE,
-            reason="Deployment-pipeline impact analysis is not built in this codebase; out of scope for this session.",
-        )
-        recorder.record(
-            MissionStage.EXPLANATION_FACTS, StageStatus.NOT_APPLICABLE,
-            reason="Structured explanation-facts generation is not built in this codebase; out of scope for this session.",
-        )
-        recorder.record(
-            MissionStage.EXPLANATION_DRAFT, StageStatus.NOT_APPLICABLE,
-            reason="Natural-language explanation drafting is not built in this codebase; out of scope for this session.",
-        )
+        # STAGE 6b/6c: Consumer-protection analytics (locked doc section 9) --
+        # computed from the same per-policy repricing pass the portfolio scan
+        # above already ran; NOT_APPLICABLE only when that scan itself did
+        # not run (waived, unavailable target, or connector-backed mission).
+        if raw_port is not None and raw_port.cohort_distribution is not None:
+            result.cohort_distribution = SectionResult(status=AnalysisStatus.SUCCEEDED, data=raw_port.cohort_distribution)
+            recorder.record(MissionStage.COHORT_DISTRIBUTION, StageStatus.COMPLETED)
+        else:
+            result.cohort_distribution = SectionResult(
+                status=AnalysisStatus.NOT_RUN,
+                reason="Cohort impact distribution requires the full portfolio blast-radius scan to have run.",
+            )
+            recorder.record(
+                MissionStage.COHORT_DISTRIBUTION, StageStatus.NOT_APPLICABLE,
+                reason="Portfolio blast-radius scan did not run for this mission (see PORTFOLIO_IMPACT stage).",
+            )
+
+        if raw_port is not None and raw_port.pipeline_impact is not None:
+            result.pipeline_impact = SectionResult(status=AnalysisStatus.SUCCEEDED, data=raw_port.pipeline_impact)
+            recorder.record(MissionStage.PIPELINE_IMPACT, StageStatus.COMPLETED)
+        else:
+            result.pipeline_impact = SectionResult(
+                status=AnalysisStatus.NOT_RUN,
+                reason="30/60/90-day renewal pipeline impact requires the full portfolio blast-radius scan to have run.",
+            )
+            recorder.record(
+                MissionStage.PIPELINE_IMPACT, StageStatus.NOT_APPLICABLE,
+                reason="Portfolio blast-radius scan did not run for this mission (see PORTFOLIO_IMPACT stage).",
+            )
+
+        # STAGE 6d/6e: Consumer explanation facts + bounded draft (locked doc
+        # section 10) -- only meaningful when a premium mismatch was actually
+        # reproduced for at least one scenario; a clean mission has nothing
+        # to explain.
+        first_mismatch_exp = next((e for e in experiments_list if not e.matches), None)
+        recon_root_cause = result.reconciliation.data.root_cause if result.reconciliation.data else None
+
+        if first_mismatch_exp is not None and recon_root_cause is not None:
+            try:
+                facts = build_explanation_facts(
+                    case_id=first_mismatch_exp.experiment_id,
+                    prior_premium=Decimal(first_mismatch_exp.expected_premium),
+                    new_premium=Decimal(first_mismatch_exp.actual_premium),
+                    factor_label=recon_root_cause.title,
+                    effective_date=left_pkg.effective_period.start,
+                )
+            except (ArithmeticError, ValueError, TypeError):
+                # Not a bug in this code -- an honestly-inapplicable case, e.g.
+                # the mismatched experiment's premium is a non-numeric
+                # connector-failure marker ("N/A (connector failure)") rather
+                # than a real quoted premium. Nothing to explain.
+                reason = "The reproduced mismatch has no numeric expected/actual premium pair to explain (e.g. a connector-failure probe)."
+                result.explanation_facts = SectionResult(status=AnalysisStatus.NOT_RUN, reason=reason)
+                recorder.record(MissionStage.EXPLANATION_FACTS, StageStatus.NOT_APPLICABLE, reason=reason)
+                result.explanation_draft = SectionResult(status=AnalysisStatus.NOT_RUN, reason=reason)
+                recorder.record(MissionStage.EXPLANATION_DRAFT, StageStatus.NOT_APPLICABLE, reason=reason)
+            else:
+                result.explanation_facts = SectionResult(status=AnalysisStatus.SUCCEEDED, data=facts)
+                recorder.record(MissionStage.EXPLANATION_FACTS, StageStatus.COMPLETED)
+
+                if self._is_cancelled(mission.mission_id, cancellation_check):
+                    return self._finalize_cancelled(mission, result, agent_actions, recorder)
+
+                gemini_draft_text: str | None = None
+                decision, evidence = self._ask_gemini(
+                    mission.mission_id, budget, "EXPLANATION_DRAFT", ExplanationDraftDecision,
+                    system_instruction=(
+                        "You are the RateGuard Consumer Explanation Drafter. Write a short, factual, "
+                        "plain-language explanation of a premium change using ONLY the numbers and dates "
+                        "in the supplied facts object. Never state a cause, amount, or date not present "
+                        "in those facts. Never state legal compliance, blame, eligibility, or coverage "
+                        "advice."
+                    ),
+                    prompt=f"ExplanationFacts: {facts.model_dump_json()}",
+                )
+                if decision is not None:
+                    gemini_draft_text = decision.draft_text
+
+                draft = build_explanation_draft(facts, gemini_draft_text)
+
+                if draft.source == "gemini":
+                    agent_actions.append(self._decision_action(
+                        "Consumer Explanation Drafter", "EXPLANATION_DRAFT",
+                        "Gemini drafted a consumer explanation from the deterministic facts object; "
+                        "every amount/date it cited was validated against those facts.",
+                        evidence, is_gemini=True,
+                        needs_human_review=decision.needs_human_review if decision else False,
+                    ))
+                else:
+                    reason = (
+                        "UNSUPPORTED_FACT_VALUE" if gemini_draft_text
+                        else (evidence.failure_category if evidence else "CALL_BUDGET_EXHAUSTED")
+                    )
+                    agent_actions.append(self._decision_action(
+                        "Consumer Explanation Drafter", "EXPLANATION_DRAFT",
+                        "Deterministic fallback template used (Gemini unavailable, or its draft cited a "
+                        "value outside the facts object and was rejected).",
+                        evidence, is_gemini=False, fallback_reason=reason,
+                    ))
+
+                result.explanation_draft = SectionResult(status=AnalysisStatus.SUCCEEDED, data=draft)
+                recorder.record(MissionStage.EXPLANATION_DRAFT, StageStatus.COMPLETED)
+        else:
+            reason = "No reproduced premium mismatch to explain."
+            result.explanation_facts = SectionResult(status=AnalysisStatus.NOT_RUN, reason=reason)
+            recorder.record(MissionStage.EXPLANATION_FACTS, StageStatus.NOT_APPLICABLE, reason=reason)
+            result.explanation_draft = SectionResult(status=AnalysisStatus.NOT_RUN, reason=reason)
+            recorder.record(MissionStage.EXPLANATION_DRAFT, StageStatus.NOT_APPLICABLE, reason=reason)
 
         if self._is_cancelled(mission.mission_id, cancellation_check):
             return self._finalize_cancelled(mission, result, agent_actions, recorder)

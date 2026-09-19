@@ -70,5 +70,10 @@ def test_release_conformance_material_drift_fully_accounts_for_every_stage():
         MissionStage.EXPLANATION_FACTS,
         MissionStage.EXPLANATION_DRAFT,
     ):
-        assert by_stage[unbuilt].status == StageStatus.NOT_APPLICABLE
-        assert "not built in this codebase" in by_stage[unbuilt].reason
+        # These modules are now built (consumer-protection/explanations); each
+        # stage must still be honestly accounted for: COMPLETED, or
+        # NOT_APPLICABLE with a stated reason -- never silently missing.
+        outcome = by_stage[unbuilt]
+        assert outcome.status in (StageStatus.COMPLETED, StageStatus.NOT_APPLICABLE)
+        if outcome.status == StageStatus.NOT_APPLICABLE:
+            assert outcome.reason

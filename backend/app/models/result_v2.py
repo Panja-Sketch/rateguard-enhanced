@@ -57,6 +57,7 @@ class ExperimentsData(BaseModel):
     total_executed: int = 0
     match_count: int = 0
     mismatch_count: int = 0
+    inconclusive_count: int = 0
     reduction_pct: float = 0.0
     experiments: list[RuntimeExperiment] = Field(default_factory=list)
 

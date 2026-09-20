@@ -19,6 +19,12 @@ from app.ingestion.workbook_v1.formulas import (
 )
 from app.ingestion.workbook_v1.limits import COMPILER_VERSION
 from app.ingestion.workbook_v1.sanitize import sanitize_display_and_export
+from app.ingestion.workbook_v1.vocabulary import (
+    RECOGNIZED_CURRENCIES,
+    RECOGNIZED_JURISDICTIONS,
+    SUPPORTED_CURRENCIES,
+    SUPPORTED_JURISDICTIONS,
+)
 from app.ipir.common import EffectivePeriod
 from app.ipir.enums import InputDataType, RoundingMode, TableLookupType, TransactionType
 from app.ipir.inputs import PricingInput
@@ -106,7 +112,50 @@ def build_metadata(rows: list[dict]) -> dict[str, str]:
             message=f"RG_METADATA is missing required key(s): {', '.join(missing)}.",
             details=[WorkbookErrorDetail(sheet="RG_METADATA", note=k) for k in missing],
         )
+    _validate_currency_and_jurisdiction(metadata)
     return metadata
+
+
+def _validate_currency_and_jurisdiction(metadata: dict[str, str]) -> None:
+    """Semantic (not merely format) validation of currency and jurisdiction.
+    Exact, case-sensitive codes: an unsupported value is rejected, never
+    normalized into a supported one."""
+    currency = metadata["currency"]
+    if currency not in SUPPORTED_CURRENCIES:
+        recognized = currency in RECOGNIZED_CURRENCIES
+        raise WorkbookRejectionError(
+            code="UNSUPPORTED_CURRENCY",
+            message=(
+                f"RG_METADATA currency {currency!r} is "
+                f"{'a recognized ISO 4217 code but not supported' if recognized else 'not a recognized ISO 4217 code'}"
+                f" by this product scope. Supported: {sorted(SUPPORTED_CURRENCIES)}."
+            ),
+            details=[WorkbookErrorDetail(sheet="RG_METADATA", note="currency")],
+        )
+
+    country = metadata["country"]
+    supported_states = SUPPORTED_JURISDICTIONS.get(country)
+    if supported_states is None:
+        raise WorkbookRejectionError(
+            code="UNSUPPORTED_JURISDICTION_COUNTRY",
+            message=(
+                f"RG_METADATA country {country!r} is not a supported jurisdiction. "
+                f"Supported: {sorted(SUPPORTED_JURISDICTIONS)}."
+            ),
+            details=[WorkbookErrorDetail(sheet="RG_METADATA", note="country")],
+        )
+    state = metadata.get("state", "")
+    if state not in supported_states:
+        recognized = state in RECOGNIZED_JURISDICTIONS.get(country, frozenset())
+        raise WorkbookRejectionError(
+            code="UNSUPPORTED_JURISDICTION_STATE",
+            message=(
+                f"RG_METADATA state {state!r} for country {country!r} is "
+                f"{'a recognized code but not supported' if recognized else 'missing or not a recognized code'}"
+                f" by this product scope. Supported: {sorted(supported_states)}."
+            ),
+            details=[WorkbookErrorDetail(sheet="RG_METADATA", note="state")],
+        )
 
 
 def build_inputs(rows: list[dict]) -> list[PricingInput]:

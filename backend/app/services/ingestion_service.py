@@ -10,6 +10,7 @@ from app.ingestion.workbook_v1.compiler import compile_workbook
 from app.ipir.enums import ProvenanceSourceType
 from app.ipir.provenance import Provenance, SourceReference
 from app.ipir.v0_2.compat import lower_to_v0_1
+from app.services.source_control_cases import save_verified_control_cases
 from app.storage import get_run_store
 from app.storage.artifacts import (
     ArtifactCategory,
@@ -166,6 +167,10 @@ class PricingSourceIngestionService:
         )
         self.artifact_store.save_artifact(ipir_art, ipir_json)
 
+        verified_cases = result.evidence.get("verified_control_cases")
+        if verified_cases:
+            save_verified_control_cases(tenant_id, source_descriptor.source_id, verified_cases, self.artifact_store)
+
         return result
 
 
@@ -213,6 +218,16 @@ def _compile_controlled_workbook(source: SourceDescriptor, content: bytes) -> Ad
         ),
     )
 
+    # Only control cases that actually passed against the oracle are handed on
+    # to mission test planning (a failing golden example is not a valid probe).
+    failed_case_ids = {r.case_id for r in receipt.control_case_results if not r.passed}
+    verified_control_cases = [
+        case.model_dump(mode="json")
+        for case in receipt.package.control_cases
+        if case.case_id not in failed_case_ids
+        and any(r.case_id == case.case_id for r in receipt.control_case_results)
+    ]
+
     return AdapterResult(
         source_id=source.source_id,
         source_type=SourceFormat.EXCEL,
@@ -224,6 +239,7 @@ def _compile_controlled_workbook(source: SourceDescriptor, content: bytes) -> Ad
         confidence=1.0 if receipt.status == "VERIFIED" else 0.4,
         evidence={
             "compilation_receipt": receipt.model_dump(mode="json", exclude={"package"}),
+            "verified_control_cases": verified_control_cases,
         },
         provenance=provenance,
         requires_human_review=receipt.status != "VERIFIED",

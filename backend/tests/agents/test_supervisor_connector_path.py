@@ -1,4 +1,13 @@
-"""Integration-level tests proving the locked golden case ($700.00 canonical
+"""SEEDED-PLAN unit tests of the supervisor's connector decision logic.
+
+These deliberately replace the test planner with a fixed single-scenario plan
+so they isolate *decision semantics* (proven mismatch vs equivalence vs
+inconclusive evidence). They are NOT evidence that the real planner produces
+the right probes -- that is proven, without any planner monkeypatch, by
+`tests/integration/test_workbook_to_connector_mission_e2e.py` and
+`tests/testing/test_package_probes.py`.
+
+Original description: integration-level tests proving the locked golden case ($700.00 canonical
 vs $655.00 defective, exact first-divergent-node) through the real
 `AssuranceSupervisor.run_mission` connector path -- Source A is the golden
 IPIR v0.2 package (lowered to v0.1), Source B is a live REST connector call
@@ -30,6 +39,7 @@ from app.models.mission import (
     MissionObjective,
     PricingSourceRef,
 )
+from app.models.result_v2 import AnalysisStatus
 from app.storage.memory_store import InMemoryRunStore
 from rating_engine.main import app as real_rating_engine_app
 
@@ -97,7 +107,7 @@ def _supervisor_with_real_demo_connector() -> AssuranceSupervisor:
     supervisor = AssuranceSupervisor(
         store, connector_client_factory=lambda: ConnectorClient(transport=transport)
     )
-    supervisor.test_generator.generate_plan = lambda pkg, diff, impact: _single_scenario_plan(pkg.id)
+    supervisor.test_generator.generate_plan = lambda pkg, diff, impact, **_kw: _single_scenario_plan(pkg.id)
     return supervisor
 
 
@@ -145,11 +155,11 @@ def test_golden_case_defective_connector_blocks_with_first_divergent_node():
     assert recorded_stages == set(MISSION_STAGE_ORDER)
 
 
-def test_connector_hard_failure_never_produces_pass():
-    """Every probe fails outright (connector unreachable/non-retryable
-    failure) -- this must BLOCK_DEPLOYMENT with a distinct reason, never PASS
-    and never a plain mismatch-count message that misrepresents an
-    unreachable target as a confirmed price disagreement."""
+def test_connector_hard_failure_requires_review_and_is_not_reported_as_a_pricing_defect():
+    """Every probe fails outright (connector unreachable/timed out). That is
+    inconclusive evidence: REVIEW_REQUIRED (locked doc 7.4), never PASS and
+    never BLOCK_DEPLOYMENT, which would misrepresent an operational failure as
+    a confirmed price disagreement."""
     left_pkg = _load_left_pkg()
     store = InMemoryRunStore()
 
@@ -162,7 +172,7 @@ def test_connector_hard_failure_never_produces_pass():
             )
 
     supervisor = AssuranceSupervisor(store, connector_client_factory=lambda: _AlwaysFailsClient())
-    supervisor.test_generator.generate_plan = lambda pkg, diff, impact: _single_scenario_plan(pkg.id)
+    supervisor.test_generator.generate_plan = lambda pkg, diff, impact, **_kw: _single_scenario_plan(pkg.id)
     mission = _mission("rating-engine-demo", "canonical-v1")
 
     result = supervisor.run_mission(
@@ -170,9 +180,14 @@ def test_connector_hard_failure_never_produces_pass():
         target_connector=ConnectorSelection(connector_id="rating-engine-demo", engine_version="canonical-v1"),
     )
 
-    assert result.release_decision.data.status == "BLOCK_DEPLOYMENT"
-    assert any("failed" in r.lower() or "unreachable" in r.lower() for r in result.release_decision.data.blocking_reasons)
-    assert result.release_decision.data.status != "PASS"
+    decision = result.release_decision.data
+    assert decision.status == "REVIEW_REQUIRED"
+    assert any("inconclusive" in r.lower() for r in decision.blocking_reasons)
+    assert all("mismatch" not in r.lower() for r in decision.blocking_reasons)
+    assert result.experiments.data.mismatch_count == 0
+    assert result.experiments.data.inconclusive_count == 1
+    assert result.experiments.data.experiments[0].outcome == "INCONCLUSIVE"
+    assert result.reconciliation.status != AnalysisStatus.SUCCEEDED  # no fabricated root cause
 
 
 def test_connector_partial_response_forces_review_required_not_pass():
@@ -191,7 +206,7 @@ def test_connector_partial_response_forces_review_required_not_pass():
             )
 
     supervisor = AssuranceSupervisor(store, connector_client_factory=lambda: _PartialResponseClient())
-    supervisor.test_generator.generate_plan = lambda pkg, diff, impact: _single_scenario_plan(pkg.id)
+    supervisor.test_generator.generate_plan = lambda pkg, diff, impact, **_kw: _single_scenario_plan(pkg.id)
     mission = _mission("rating-engine-demo", "canonical-v1")
 
     result = supervisor.run_mission(
@@ -200,3 +215,90 @@ def test_connector_partial_response_forces_review_required_not_pass():
     )
 
     assert result.release_decision.data.status != "PASS"
+
+
+def test_proven_mismatch_still_blocks_even_when_other_probes_are_inconclusive():
+    """A real, proven premium mismatch is never downgraded by unrelated
+    connector failures on other probes."""
+    left_pkg = _load_left_pkg()
+    store = InMemoryRunStore()
+    transport = httpx.ASGITransport(app=real_rating_engine_app)
+    real_client = ConnectorClient(transport=transport)
+
+    class _FailsOnRoofAge30:
+        async def send_quote(self, connector_id, engine_version, request, **kwargs):
+            if request.inputs.get("roof_age") == 30:
+                raise ConnectorException(
+                    code="CONNECTOR_TIMEOUT", message="Simulated timeout.",
+                    category=ConnectorFailureCategory.RETRYABLE,
+                )
+            return await real_client.send_quote(connector_id, engine_version, request, **kwargs)
+
+    second = _golden_scenario().model_copy(
+        update={"id": "RG_GOLDEN_002", "name": "Second probe (roof_age=30)",
+                "risk_values": {"roof_age": 30, "dwelling_limit": "300000.00"}}
+    )
+    first = _golden_scenario().model_copy(update={"risk_values": {"roof_age": 25, "dwelling_limit": "300000.00"}})
+    plan = PricingTestPlan(
+        package_id=left_pkg.id, candidate_count=2, selected_count=2,
+        selected_scenarios=[first, second], candidate_scenarios=[first, second],
+        coverage_metrics={"candidate_reduction_pct": 0.0},
+    )
+    supervisor = AssuranceSupervisor(store, connector_client_factory=lambda: _FailsOnRoofAge30())
+    supervisor.test_generator.generate_plan = lambda pkg, diff, impact, **_kw: plan
+
+    result = supervisor.run_mission(
+        _mission("rating-engine-demo", "defective-v1"), left_pkg,
+        target_connector=ConnectorSelection(connector_id="rating-engine-demo", engine_version="defective-v1"),
+    )
+
+    assert result.release_decision.data.status == "BLOCK_DEPLOYMENT"
+    assert result.experiments.data.mismatch_count == 1
+    assert result.experiments.data.inconclusive_count == 1
+    assert result.reconciliation.data.root_cause.divergence_type == "CONNECTOR_PREMIUM_MISMATCH"
+    assert result.reconciliation.data.root_cause.actual_value == "655.00"
+
+
+def test_probe_with_out_of_period_calculation_date_is_inconclusive_not_a_mismatch_or_pass():
+    left_pkg = _load_left_pkg()
+    store = InMemoryRunStore()
+    bad = _golden_scenario().model_copy(
+        update={"effective_date": "2026-09-15", "risk_values": {"roof_age": 25, "dwelling_limit": "300000.00"}}
+    )
+    plan = PricingTestPlan(
+        package_id=left_pkg.id, candidate_count=1, selected_count=1,
+        selected_scenarios=[bad], candidate_scenarios=[bad], coverage_metrics={"candidate_reduction_pct": 0.0},
+    )
+    supervisor = AssuranceSupervisor(
+        store, connector_client_factory=lambda: ConnectorClient(transport=httpx.ASGITransport(app=real_rating_engine_app))
+    )
+    supervisor.test_generator.generate_plan = lambda pkg, diff, impact, **_kw: plan
+
+    result = supervisor.run_mission(
+        _mission("rating-engine-demo", "canonical-v1"), left_pkg,
+        target_connector=ConnectorSelection(connector_id="rating-engine-demo", engine_version="canonical-v1"),
+    )
+
+    exp = result.experiments.data.experiments[0]
+    assert exp.outcome == "INCONCLUSIVE"
+    assert "CALCULATION_DATE_OUT_OF_PERIOD" in exp.inconclusive_reason
+    assert result.release_decision.data.status == "REVIEW_REQUIRED"
+    assert result.experiments.data.mismatch_count == 0
+
+
+def test_empty_plan_requires_review_never_pass():
+    left_pkg = _load_left_pkg()
+    store = InMemoryRunStore()
+    empty = PricingTestPlan(package_id=left_pkg.id, candidate_count=0, selected_count=0,
+                            coverage_metrics={"candidate_reduction_pct": 0.0})
+    supervisor = AssuranceSupervisor(
+        store, connector_client_factory=lambda: ConnectorClient(transport=httpx.ASGITransport(app=real_rating_engine_app))
+    )
+    supervisor.test_generator.generate_plan = lambda pkg, diff, impact, **_kw: empty
+
+    result = supervisor.run_mission(
+        _mission("rating-engine-demo", "canonical-v1"), left_pkg,
+        target_connector=ConnectorSelection(connector_id="rating-engine-demo", engine_version="canonical-v1"),
+    )
+    assert result.release_decision.data.status == "REVIEW_REQUIRED"
+    assert any("No probe could be executed" in r for r in result.release_decision.data.blocking_reasons)

@@ -51,10 +51,21 @@ def _derive_base_risk(package: IPIRPackage) -> dict[str, Any]:
     return base_risk
 
 
+def _default_probe_date(package: IPIRPackage) -> date:
+    """Legacy probe date (package start + 20 days), clamped into the package's
+    own effective period so a short-lived package never gets an inactive date."""
+    d = package.effective_period.start + timedelta(days=20)
+    end = package.effective_period.end
+    return end if end is not None and d > end else d
+
+
 def generate_candidate_scenarios(
     diff_result: SemanticDiffResult,
     impact: ImpactAnalysis,
     package: IPIRPackage,
+    *,
+    base_risk: dict[str, Any] | None = None,
+    base_date: date | None = None,
 ) -> list[PricingTestScenario]:
     """Generates an initial candidate set of risk-directed test scenarios.
 
@@ -65,7 +76,11 @@ def generate_candidate_scenarios(
     counter = 1
     pkg_start = package.effective_period.start
 
-    base_risk: dict[str, Any] = _derive_base_risk(package)
+    # A valid workbook control case (or declared defaults) supplies the
+    # non-target fields when the caller has one; only otherwise fall back to
+    # the legacy neutral derivation.
+    base_risk = dict(base_risk) if base_risk else _derive_base_risk(package)
+    probe_date = base_date or _default_probe_date(package)
 
     # 1. Control Baseline Scenario
     candidates.append(
@@ -73,7 +88,7 @@ def generate_candidate_scenarios(
             id=f"RG_CAND_{counter:03d}",
             name="Baseline Control Scenario",
             risk_values=dict(base_risk),
-            effective_date=pkg_start + timedelta(days=20),
+            effective_date=probe_date,
             classification=ScenarioClassification.CONTROL,
             target_difference_ids=[],
             target_node_ids=[],
@@ -109,7 +124,7 @@ def generate_candidate_scenarios(
 
                 risk = dict(base_risk)
                 risk[field_name] = b_val
-                eff_date = pkg_start + timedelta(days=20)
+                eff_date = probe_date
 
                 is_control = label in ("just_below", "just_above")
                 scenario_id = f"RG_CAND_{counter:03d}"
@@ -190,7 +205,7 @@ def generate_candidate_scenarios(
                 id=f"RG_CAND_{counter:03d}",
                 name=f"Isolated Single-Defect Scenario ({field_summary})",
                 risk_values=risk,
-                effective_date=pkg_start + timedelta(days=20),
+                effective_date=probe_date,
                 classification=ScenarioClassification.SINGLE_DEFECT,
                 target_difference_ids=target_diff_ids,
                 target_node_ids=target_nodes,
@@ -232,7 +247,7 @@ def generate_candidate_scenarios(
                 id=f"RG_CAND_{counter:03d}",
                 name="Combined Multi-Defect Scenario",
                 risk_values=combined_risk,
-                effective_date=pkg_start + timedelta(days=20),
+                effective_date=probe_date,
                 classification=ScenarioClassification.MULTI_DEFECT,
                 target_difference_ids=all_target_diff_ids,
                 target_node_ids=all_target_nodes,
@@ -316,7 +331,7 @@ def generate_candidate_scenarios(
                 id=f"RG_CAND_{counter:03d}",
                 name="Sequence Order Pre-Minimum Floor Scenario",
                 risk_values=seq_risk,
-                effective_date=pkg_start + timedelta(days=20),
+                effective_date=probe_date,
                 classification=ScenarioClassification.CONSTRAINT_ORDER,
                 target_difference_ids=[d.id for d in order_diffs],
                 target_node_ids=[d.node_id for d in order_diffs],
@@ -326,4 +341,14 @@ def generate_candidate_scenarios(
         )
         counter += 1
 
+    for idx, cand in enumerate(candidates):
+        origin = "BASELINE" if idx == 0 else "MUTATION"
+        cand.metadata.setdefault("probe_origin", origin)
+        cand.metadata.setdefault("calculation_date", cand.effective_date.isoformat())
+        cand.metadata.setdefault("calculation_date_source", "EXPLICIT")
+        cand.metadata.setdefault("provenance", {
+            "classification": cand.classification.value,
+            "target_difference_ids": list(cand.target_difference_ids),
+            "target_node_ids": list(cand.target_node_ids),
+        })
     return candidates

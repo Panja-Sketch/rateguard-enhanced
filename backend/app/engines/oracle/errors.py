@@ -40,6 +40,18 @@ class EffectiveDateError(OracleError):
     pass
 
 
+class CalculationDateError(OracleError):
+    """Raised when a calculation date is missing, malformed, or outside the
+    package's effective period. Carries a specific machine-readable `code`
+    (INVALID_CALCULATION_DATE, MISSING_CALCULATION_DATE,
+    CALCULATION_DATE_OUT_OF_PERIOD)."""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+        self.message = message
+
+
 class UnsupportedIPIRFeatureError(OracleError):
     """Raised when encountering an IPIR feature not supported by oracle 0.1."""
 

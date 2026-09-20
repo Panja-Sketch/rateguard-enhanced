@@ -3,9 +3,10 @@ import hashlib
 import json
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from dataclasses import field as dc_field
+from datetime import date
 from decimal import Decimal
 from typing import Any
 
@@ -42,6 +43,7 @@ from app.engines.diff.models import SemanticDiffResult
 from app.engines.impact import PricingImpactEngine
 from app.engines.impact.models import ImpactAnalysis
 from app.engines.oracle.calculator import PremiumOracleCalculator
+from app.engines.oracle.errors import CalculationDateError
 from app.engines.portfolio import PortfolioExposureAnalyzer
 from app.engines.reconciliation import PricingReconciliationEngine
 from app.engines.testing import RiskDirectedTestGenerator
@@ -49,6 +51,7 @@ from app.engines.testing.models import PricingTestScenario, ScenarioClassificati
 from app.explanations import build_explanation_draft, build_explanation_facts
 from app.ipir.package import IPIRPackage
 from app.ipir.schema import validate_ipir_schema
+from app.ipir.v0_2.control_cases import ControlCase
 from app.models import (
     AgentAction,
     AnalysisStatus,
@@ -93,6 +96,29 @@ MAX_PROBE_ROUNDS = DEFAULT_MAX_PROBE_ROUNDS
 # regardless of which extractor (deterministic, Gemini-selected, or fallback)
 # produced it.
 LOW_CONFIDENCE_REVIEW_THRESHOLD = DEFAULT_LOW_CONFIDENCE_REVIEW_THRESHOLD
+
+
+def _date_source(tc: PricingTestScenario, resolved_source: object) -> str | None:
+    """Where the probe's date really came from. A generated probe already carries
+    its resolved date as an explicit scenario date, so the executor's own
+    resolution would always say EXPLICIT; the generation-time origin
+    (CONTROL_CASE / PACKAGE_EFFECTIVE_START) is the meaningful one."""
+    recorded = (tc.metadata or {}).get("calculation_date_source")
+    if recorded and recorded != "EXPLICIT":
+        return str(recorded)
+    return str(getattr(resolved_source, "value", resolved_source)) if resolved_source else None
+
+
+def _probe_trace_fields(tc: PricingTestScenario, calc_date: "date | None", calc_source: object) -> dict:
+    """Probe-origin and calculation-date fields carried onto every experiment
+    so evidence and reconciliation can state exactly what was run and when."""
+    meta = tc.metadata or {}
+    return {
+        "calculation_date": calc_date.isoformat() if calc_date is not None else None,
+        "calculation_date_source": _date_source(tc, calc_source),
+        "probe_origin": meta.get("probe_origin"),
+        "probe_provenance": meta.get("provenance") or {},
+    }
 
 
 @dataclass
@@ -480,7 +506,9 @@ class AssuranceSupervisor:
         right_pkg: IPIRPackage | None = None,
         target_connector: ConnectorSelection | None = None,
         cancellation_check: "Callable[[], bool] | None" = None,
+        control_cases: "Sequence[ControlCase] | None" = None,
     ) -> AssuranceResultV2:
+        control_cases = list(control_cases or [])
         agent_actions: list[AgentAction] = []
         tool_invocations: list[ToolInvocation] = []
         evidence_ids: list[str] = []
@@ -762,14 +790,22 @@ class AssuranceSupervisor:
 
             # Verification sample probes
             raw_impact = self.impact_engine.analyze(raw_diff_result, left_pkg)
-            test_plan = self.test_generator.generate_plan(left_pkg, raw_diff_result, raw_impact)
+            test_plan = self.test_generator.generate_plan(
+                left_pkg, raw_diff_result, raw_impact, control_cases=control_cases
+            )
             test_cases = test_plan.selected_scenarios[:5]
 
             experiments_list: list[RuntimeExperiment] = []
 
             for tc in test_cases:
-                exp_res = oracle.calculate_policy_premium(tc.risk_values)
-                act_res = target_calc.calculate_policy_premium(tc.risk_values)
+                # The probe's own resolved calculation date/transaction type
+                # is carried to BOTH engines (no implicit default anywhere).
+                exp_res = oracle.calculate_policy_premium(
+                    tc.risk_values, effective_date=tc.effective_date, transaction_type=tc.transaction_type
+                )
+                act_res = target_calc.calculate_policy_premium(
+                    tc.risk_values, effective_date=tc.effective_date, transaction_type=tc.transaction_type
+                )
                 matched = exp_res.final_premium == act_res.final_premium
 
                 experiments_list.append(
@@ -781,6 +817,8 @@ class AssuranceSupervisor:
                         expected_premium=str(exp_res.final_premium),
                         actual_premium=str(act_res.final_premium),
                         matches=matched,
+                        outcome="MATCH" if matched else "MISMATCH",
+                        **_probe_trace_fields(tc, exp_res.calculation_date, exp_res.calculation_date_source),
                     )
                 )
 
@@ -992,13 +1030,12 @@ class AssuranceSupervisor:
         exp_start = time.time()
         if target_connector is not None:
             # A connector target has no comparable IPIR package to diff against
-            # Source A, so there are no semantic differences to target. Instead
-            # of duplicating candidate-generation logic, this synthesizes a
-            # zero-difference self-comparison (left_pkg vs itself) so the
-            # existing, already-tested boundary/range-generation logic in
-            # `RiskDirectedTestGenerator`/`generate_candidate_scenarios` runs
-            # unmodified — it derives its boundary scenarios from `left_pkg`'s
-            # own tables/ranges, not from the (empty) diff list.
+            # Source A, so there are no semantic differences to target. The
+            # planner therefore derives its probes from Source A itself: the
+            # workbook's verified control cases, a baseline, and boundary
+            # probes mined from the compiled tables/conditions (see
+            # `app.engines.testing.package_probes`). The zero-difference
+            # self-comparison below only supplies the (empty) diff inputs.
             synthetic_diff = SemanticDiffResult(
                 left_package_id=left_pkg.id,
                 right_package_id=left_pkg.id,
@@ -1007,12 +1044,16 @@ class AssuranceSupervisor:
                 differences=[],
             )
             synthetic_impact = ImpactAnalysis(package_id=left_pkg.id)
-            test_plan = self.test_generator.generate_plan(left_pkg, synthetic_diff, synthetic_impact)
+            test_plan = self.test_generator.generate_plan(
+                left_pkg, synthetic_diff, synthetic_impact, control_cases=control_cases
+            )
             selected_tests = test_plan.selected_scenarios
             recorder.record(MissionStage.TEST_CANDIDATE_GENERATION, StageStatus.COMPLETED)
             recorder.record(MissionStage.TEST_SELECTION, StageStatus.COMPLETED)
         elif raw_diff_result and raw_impact:
-            test_plan = self.test_generator.generate_plan(left_pkg, raw_diff_result, raw_impact)
+            test_plan = self.test_generator.generate_plan(
+                left_pkg, raw_diff_result, raw_impact, control_cases=control_cases
+            )
             selected_tests = test_plan.selected_scenarios  # deterministic default
             recorder.record(MissionStage.TEST_CANDIDATE_GENERATION, StageStatus.COMPLETED)
 
@@ -1076,8 +1117,9 @@ class AssuranceSupervisor:
             )
 
         experiments_list: list[RuntimeExperiment] = []
-        mismatch_count = 0
+        mismatch_count = 0  # PROVEN premium mismatches only
         match_count = 0
+        inconclusive_count = 0  # probes that could not reach a pricing conclusion
 
         oracle = PremiumOracleCalculator(left_pkg)
         target_calc = PremiumOracleCalculator(right_pkg) if right_pkg else None
@@ -1086,7 +1128,9 @@ class AssuranceSupervisor:
         connector_budget = TargetBudget() if target_connector is not None else None
         connector_evidence_ids: list[str] = []
 
-        def _quote_via_connector(tc: PricingTestScenario) -> tuple[Decimal | None, str]:
+        def _quote_via_connector(
+            tc: PricingTestScenario, calc_date: date, calc_source: object
+        ) -> tuple[Decimal | None, str]:
             """Bridges the sync probe loop to the async `ConnectorClient` via
             `asyncio.run()`. Safe here because the entire call chain
             (worker_endpoint -> AssuranceWorker -> MissionExecutionService ->
@@ -1121,8 +1165,10 @@ class AssuranceSupervisor:
                 engine_version=target_connector.engine_version,
                 product=mission.objective.product,
                 jurisdiction=mission.objective.jurisdiction,
-                effective_date=left_pkg.effective_period.start,
-                transaction_type=tc.risk_values.get("transaction_type", "NEW_BUSINESS"),
+                # The SAME resolved date the oracle used for this probe -- never
+                # the package start by default.
+                effective_date=calc_date,
+                transaction_type=tc.transaction_type,
                 inputs=connector_inputs,
                 trace_requested=True,
             )
@@ -1146,6 +1192,10 @@ class AssuranceSupervisor:
                         "connector_id": target_connector.connector_id,
                         "engine_version": target_connector.engine_version,
                         "correlation_id": mission.mission_id,
+                        "scenario_id": tc.id,
+                        "probe_origin": (tc.metadata or {}).get("probe_origin"),
+                        "calculation_date": calc_date.isoformat(),
+                        "calculation_date_source": _date_source(tc, calc_source),
                         "request_sha256": req_hash,
                         "response_sha256": None,
                         "status": status,
@@ -1171,6 +1221,10 @@ class AssuranceSupervisor:
                     "connector_id": target_connector.connector_id,
                     "engine_version": target_connector.engine_version,
                     "correlation_id": mission.mission_id,
+                    "scenario_id": tc.id,
+                    "probe_origin": (tc.metadata or {}).get("probe_origin"),
+                    "calculation_date": calc_date.isoformat(),
+                    "calculation_date_source": _date_source(tc, calc_source),
                     "connector_request_id": resp.request_id,
                     "request_sha256": req_hash,
                     "response_sha256": resp_hash,
@@ -1183,40 +1237,68 @@ class AssuranceSupervisor:
             connector_probe_outcomes.append(status)
             return (Decimal(premium_str) if premium_str else None), status
 
-        def _run_probe(tc: PricingTestScenario) -> tuple[Decimal, Decimal | None]:
-            """Executes exactly one deterministic premium-oracle-vs-target probe.
-            Which scenario reaches this function is Gemini's only discretion —
-            the arithmetic itself is untouched deterministic engine code."""
-            exp_prem = oracle.calculate_policy_premium(tc.risk_values).final_premium
-            if target_connector is not None:
-                act_prem, _status = _quote_via_connector(tc)
-            elif target_calc:
-                act_prem = target_calc.calculate_policy_premium(tc.risk_values).final_premium
-            else:
-                act_prem = Decimal("0.00")
-            return exp_prem, act_prem
+        def _execute_probe(tc: PricingTestScenario, category: str) -> RuntimeExperiment:
+            """Executes exactly one deterministic oracle-vs-target probe and
+            classifies it as MATCH, MISMATCH (a *proven* premium difference) or
+            INCONCLUSIVE (the target/date/evidence could not support any pricing
+            conclusion -- never counted as a mismatch). Which scenario reaches
+            this function is Gemini's only discretion -- the arithmetic itself
+            is untouched deterministic engine code."""
+            nonlocal match_count, mismatch_count, inconclusive_count
+            exp_prem: Decimal | None = None
+            act_prem: Decimal | None = None
+            calc_date = None
+            calc_source = None
+            outcome = "MATCH"
+            reason: str | None = None
+            try:
+                expected = oracle.calculate_policy_premium(
+                    tc.risk_values, effective_date=tc.effective_date, transaction_type=tc.transaction_type
+                )
+                exp_prem, calc_date, calc_source = (
+                    expected.final_premium, expected.calculation_date, expected.calculation_date_source,
+                )
+                if target_connector is not None:
+                    act_prem, status = _quote_via_connector(tc, calc_date, calc_source)
+                    if act_prem is None:
+                        outcome, reason = "INCONCLUSIVE", f"CONNECTOR_{status}"
+                elif target_calc:
+                    act_prem = target_calc.calculate_policy_premium(
+                        tc.risk_values, effective_date=tc.effective_date, transaction_type=tc.transaction_type
+                    ).final_premium
+                else:
+                    act_prem = Decimal("0.00")
+                if outcome != "INCONCLUSIVE":
+                    outcome = "MATCH" if exp_prem == act_prem else "MISMATCH"
+            except CalculationDateError as exc:
+                outcome, reason = "INCONCLUSIVE", f"{exc.code}: {exc.message}"
 
-        for tc in selected_tests:
-            exp_prem, act_prem = _run_probe(tc)
-            matched = act_prem is not None and exp_prem == act_prem
-            if matched:
+            if outcome == "MATCH":
                 match_count += 1
-            else:
+            elif outcome == "MISMATCH":
                 mismatch_count += 1
+            else:
+                inconclusive_count += 1
 
             scenario_id = getattr(tc, "id", getattr(tc, "scenario_id", "RG-EXP"))
             budget.executed_test_ids.add(scenario_id)
-            experiments_list.append(
-                RuntimeExperiment(
-                    experiment_id=scenario_id,
-                    probe_name=tc.name,
-                    category="RISK_DIRECTED",
-                    risk_inputs=tc.risk_values,
-                    expected_premium=str(exp_prem),
-                    actual_premium=(str(act_prem) if act_prem is not None else "N/A (connector failure or partial response)"),
-                    matches=matched,
-                )
+            return RuntimeExperiment(
+                experiment_id=scenario_id,
+                probe_name=tc.name,
+                category=category,
+                risk_inputs=tc.risk_values,
+                expected_premium=str(exp_prem) if exp_prem is not None else "N/A (calculation date rejected)",
+                actual_premium=(
+                    str(act_prem) if act_prem is not None else "N/A (connector failure or partial response)"
+                ),
+                matches=outcome == "MATCH",
+                outcome=outcome,
+                inconclusive_reason=reason,
+                **_probe_trace_fields(tc, calc_date, calc_source),
             )
+
+        for tc in selected_tests:
+            experiments_list.append(_execute_probe(tc, "RISK_DIRECTED"))
 
         # Real Gemini decision point (bounded to MAX_PROBE_ROUNDS): decide whether
         # enough evidence has been gathered, or request one more bounded round of
@@ -1238,7 +1320,7 @@ class AssuranceSupervisor:
             if not remaining_pool:
                 break
 
-            mismatched_probe_names = [e.probe_name for e in experiments_list if not e.matches]
+            mismatched_probe_names = [e.probe_name for e in experiments_list if e.outcome == "MISMATCH"]
             decision, evidence = self._ask_gemini(
                 mission.mission_id, budget, "EVIDENCE_SUFFICIENCY", EvidenceSufficiencyDecision,
                 system_instruction=(
@@ -1287,25 +1369,7 @@ class AssuranceSupervisor:
             ))
 
             for extra_id in extra_ids:
-                tc = remaining_pool[extra_id]
-                exp_prem, act_prem = _run_probe(tc)
-                matched = act_prem is not None and exp_prem == act_prem
-                if matched:
-                    match_count += 1
-                else:
-                    mismatch_count += 1
-                budget.executed_test_ids.add(extra_id)
-                experiments_list.append(
-                    RuntimeExperiment(
-                        experiment_id=extra_id,
-                        probe_name=tc.name,
-                        category="ADDITIONAL_PROBE",
-                        risk_inputs=tc.risk_values,
-                        expected_premium=str(exp_prem),
-                        actual_premium=(str(act_prem) if act_prem is not None else "N/A (connector failure or partial response)"),
-                        matches=matched,
-                    )
-                )
+                experiments_list.append(_execute_probe(remaining_pool[extra_id], "ADDITIONAL_PROBE"))
 
         exp_latency = (time.time() - exp_start) * 1000
 
@@ -1316,6 +1380,7 @@ class AssuranceSupervisor:
                 total_executed=len(selected_tests),
                 match_count=match_count,
                 mismatch_count=mismatch_count,
+                inconclusive_count=inconclusive_count,
                 reduction_pct=test_plan.coverage_metrics.get("candidate_reduction_pct", 0.0),
                 experiments=experiments_list,
             ),
@@ -1343,15 +1408,17 @@ class AssuranceSupervisor:
             recorder.record(MissionStage.ORACLE_EXECUTION, StageStatus.COMPLETED)
             if not connector_probe_outcomes:
                 recorder.record(
-                    MissionStage.TARGET_EXECUTION, StageStatus.FAILED,
+                    MissionStage.TARGET_EXECUTION, StageStatus.REVIEW_REQUIRED,
                     reason="No connector probes were executed for this mission.",
                 )
             else:
                 connector_any_partial_response = "PARTIAL_RESPONSE" in connector_probe_outcomes
                 connector_all_probes_failed = all(s != "SUCCESS" for s in connector_probe_outcomes)
                 if connector_all_probes_failed:
+                    # An unreachable/unauthenticated/malformed/timed-out target is
+                    # inconclusive evidence (REVIEW_REQUIRED), never a price defect.
                     recorder.record(
-                        MissionStage.TARGET_EXECUTION, StageStatus.FAILED,
+                        MissionStage.TARGET_EXECUTION, StageStatus.REVIEW_REQUIRED,
                         reason=f"All {len(connector_probe_outcomes)} connector probe(s) failed to return a premium.",
                     )
                 elif connector_any_partial_response:
@@ -1404,7 +1471,7 @@ class AssuranceSupervisor:
             )
             recorder.record(MissionStage.RECONCILIATION, StageStatus.COMPLETED)
         elif target_connector is not None and mismatch_count > 0:
-            first_mismatch = next(e for e in experiments_list if not e.matches)
+            first_mismatch = next(e for e in experiments_list if e.outcome == "MISMATCH")
             first_div = first_mismatch.first_divergent_node or "connector_final_premium"
             result.reconciliation = SectionResult(
                 status=AnalysisStatus.SUCCEEDED,
@@ -1416,17 +1483,15 @@ class AssuranceSupervisor:
                         title="Connector Premium Divergence",
                         explanation=(
                             f"Independent IPIR oracle (Source A) computed {first_mismatch.expected_premium} "
-                            f"for scenario '{first_mismatch.probe_name}'; connector "
+                            f"for scenario '{first_mismatch.probe_name}' "
+                            f"(probe origin {first_mismatch.probe_origin or 'UNKNOWN'}, calculation date "
+                            f"{first_mismatch.calculation_date} via {first_mismatch.calculation_date_source}); connector "
                             f"'{target_connector.connector_id}@{target_connector.engine_version}' "
                             f"returned {first_mismatch.actual_premium}."
                         ),
                         expected_value=first_mismatch.expected_premium,
                         actual_value=first_mismatch.actual_premium,
-                        divergence_type=(
-                            "CONNECTOR_FAILURE"
-                            if first_mismatch.actual_premium.startswith("N/A")
-                            else "CONNECTOR_PREMIUM_MISMATCH"
-                        ),
+                        divergence_type="CONNECTOR_PREMIUM_MISMATCH",
                     ),
                 ),
             )
@@ -1878,34 +1943,33 @@ class AssuranceSupervisor:
         self._mark_stage(mission.mission_id, "DECISION")
         blocking_reasons: list[str] = []
         if mismatch_count > 0:
-            if connector_all_probes_failed:
-                blocking_reasons.append(
-                    f"Connector '{target_connector.connector_id}@{target_connector.engine_version}' "
-                    f"failed to return a usable premium for all {len(connector_probe_outcomes)} probe(s) "
-                    "attempted — the candidate implementation could not be reached or evaluated."
-                )
-            else:
-                blocking_reasons.append(f"{mismatch_count} price calculation mismatches reproduced.")
+            blocking_reasons.append(f"{mismatch_count} price calculation mismatches reproduced.")
         if result.blast_radius.data and float(result.blast_radius.data.absolute_financial_exposure) > 0:
             blocking_reasons.append(f"Financial exposure of ${result.blast_radius.data.absolute_financial_exposure} exceeds zero-drift tolerance.")
         if sem_diffs:
             blocking_reasons.append(f"{len(sem_diffs)} AST semantic differences identified.")
 
-        target_exec_outcome = recorder.outcome_for(MissionStage.TARGET_EXECUTION)
-        if (
-            target_connector is not None
-            and target_exec_outcome is not None
-            and target_exec_outcome.status == StageStatus.FAILED
-            and mismatch_count == 0
-        ):
-            # No probes ever reached the connector (e.g. no test scenarios
-            # were generated) — this is a target-execution failure even
-            # though the mismatch-counting loop never ran and therefore
-            # never itself produced a blocking reason.
-            blocking_reasons.append(
-                f"Target execution against connector '{target_connector.connector_id}' failed: "
-                f"{target_exec_outcome.reason}"
+        # Inconclusive evidence is NOT a pricing defect (locked doc 7.4): an
+        # unreachable, unauthenticated, malformed, timed-out or otherwise
+        # incomplete connector result -- or a probe whose calculation date was
+        # rejected -- can never be represented as BLOCK_DEPLOYMENT on its own.
+        # A proven mismatch elsewhere still blocks; otherwise this forces
+        # REVIEW_REQUIRED and can never yield PASS.
+        if target_connector is not None and not connector_probe_outcomes and inconclusive_count == 0:
+            review_reasons.append(
+                f"No probe could be executed against connector '{target_connector.connector_id}' "
+                "(no executable probe could be generated from the compiled source); no pricing "
+                "conclusion can be drawn."
             )
+            review_required = True
+        if inconclusive_count > 0:
+            reasons = sorted({e.inconclusive_reason for e in experiments_list if e.outcome == "INCONCLUSIVE" and e.inconclusive_reason})
+            review_reasons.append(
+                f"{inconclusive_count} of {len(experiments_list)} probe(s) were inconclusive "
+                f"({', '.join(reasons) or 'no detail'}); the candidate implementation could not be "
+                "evaluated for them, which is not evidence of a pricing defect."
+            )
+            review_required = True
 
         # A connector partial-response category failure is a data-completeness
         # gap, not a confirmed numeric mismatch — it must never be silently
@@ -1951,7 +2015,7 @@ class AssuranceSupervisor:
             # product/jurisdiction mismatch between the two sources was
             # flagged -- that must never be silently absorbed into a PASS.
             decision_status = "REVIEW_REQUIRED"
-            summary_msg = "No pricing drift found, but this mission cannot issue a PASS: " + " ".join(review_reasons)
+            summary_msg = "No pricing drift was proven, but this mission cannot issue a PASS: " + " ".join(review_reasons)
             rec_msg = "Resolve the flagged issue, then re-run assurance verification."
             blocking_reasons = review_reasons
         else:

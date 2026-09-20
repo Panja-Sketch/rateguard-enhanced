@@ -10,6 +10,7 @@ from app.messaging.models import AssuranceJob
 from app.messaging.outcomes import ProcessingOutcome, ProcessingResult, safe_error_text
 from app.models.mission import AssuranceMission, ConnectorSelection, MissionStatus, PricingSourceRef
 from app.services.mission_transitions import apply_transition
+from app.services.source_control_cases import load_verified_control_cases
 from app.storage import AssuranceRunStatus, get_run_store
 from app.storage.artifacts import ArtifactKey, get_artifact_store
 from app.storage.interfaces import LeaseOutcome
@@ -245,11 +246,18 @@ class MissionExecutionService:
             elif mission.source_b:
                 right_pkg = _resolve_source_package(mission.source_b, mission_tenant)
 
+            control_cases = (
+                load_verified_control_cases(mission_tenant, mission.source_a.source_id)
+                if mission.source_a.source_type == "FILE" and mission_tenant
+                else []
+            )
+
             supervisor = AssuranceSupervisor(store)
             result = supervisor.run_mission(
                 mission, left_pkg, right_pkg,
                 target_connector=target_connector,
                 cancellation_check=_cancellation_requested,
+                control_cases=control_cases,
             )
 
             term_status = mission.status.value if hasattr(mission.status, "value") else str(mission.status)

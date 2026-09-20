@@ -77,9 +77,9 @@ def test_supervisor_blocks_when_semantic_diff_misses_a_behavioral_mismatch():
     call_count = {"n": 0}
     real_calculate = PremiumOracleCalculator.calculate_policy_premium
 
-    def fake_calculate(self, risk_inputs):
+    def fake_calculate(self, risk_inputs, **kwargs):
         call_count["n"] += 1
-        result = real_calculate(self, risk_inputs)
+        result = real_calculate(self, risk_inputs, **kwargs)
         # The oracle/target calculators are invoked alternately per probe
         # (expected, then actual) -- force a mismatch on the very first
         # probe's target-side calculation only.

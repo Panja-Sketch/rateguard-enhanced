@@ -188,8 +188,14 @@ class RemediationService:
                 scenario = by_id.get(scenario_id)
                 if scenario is None:
                     continue
-                expected = intent_oracle.calculate_policy_premium(scenario.risk_values).final_premium
-                actual = patched_oracle.calculate_policy_premium(scenario.risk_values).final_premium
+                expected = intent_oracle.calculate_policy_premium(
+                    scenario.risk_values, effective_date=scenario.effective_date,
+                    transaction_type=scenario.transaction_type,
+                ).final_premium
+                actual = patched_oracle.calculate_policy_premium(
+                    scenario.risk_values, effective_date=scenario.effective_date,
+                    transaction_type=scenario.transaction_type,
+                ).final_premium
                 rerun += 1
                 if expected == actual:
                     passed += 1

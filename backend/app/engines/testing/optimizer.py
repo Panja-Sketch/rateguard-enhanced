@@ -1,4 +1,5 @@
 from app.engines.testing.models import PricingTestScenario
+from app.engines.testing.package_probes import canonical_probe_key
 from app.engines.testing.scorer import score_scenario
 
 
@@ -22,13 +23,10 @@ def optimize_test_plan(
         cand_nodes = set(cand.target_node_ids)
         cand_groups = set(cand.target_issue_group_ids)
 
-        combo_key = (
-            cand.risk_values.get("roof_age"),
-            cand.risk_values.get("territory"),
-            cand.effective_date,
-            cand.transaction_type,
-            cand.name,
-        )
+        # Full policy identity: two probes are equivalent only when every
+        # input, the date and the transaction type match (not just a
+        # hard-coded pair of product-specific fields).
+        combo_key = (canonical_probe_key(cand.risk_values, cand.effective_date, cand.transaction_type), cand.name)
 
         if combo_key in covered_risk_combos:
             continue

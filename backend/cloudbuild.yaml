@@ -5,10 +5,10 @@ steps:
       - '-f'
       - 'backend/Dockerfile'
       - '-t'
-      - 'us-central1-docker.pkg.dev/${PROJECT_ID}/rateguard/rateguard-api:${_IMAGE_TAG}'
+      - 'us-central1-docker.pkg.dev/${PROJECT_ID}/rateguard-images/rateguard-api:${_IMAGE_TAG}'
       - '.'
 images:
-  - 'us-central1-docker.pkg.dev/${PROJECT_ID}/rateguard/rateguard-api:${_IMAGE_TAG}'
+  - 'us-central1-docker.pkg.dev/${PROJECT_ID}/rateguard-images/rateguard-api:${_IMAGE_TAG}'
 substitutions:
   # Default preserves the existing production build behavior exactly
   # (no deploy script other than a candidate deploy passes _IMAGE_TAG). A candidate/staging build

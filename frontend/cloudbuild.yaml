@@ -19,10 +19,10 @@ steps:
       - '--build-arg'
       - 'NEXT_PUBLIC_FIREBASE_MEASUREMENT_ID=${_NEXT_PUBLIC_FIREBASE_MEASUREMENT_ID}'
       - '-t'
-      - 'us-central1-docker.pkg.dev/${PROJECT_ID}/rateguard/rateguard-web:${_IMAGE_TAG}'
+      - 'us-central1-docker.pkg.dev/${PROJECT_ID}/rateguard-images/rateguard-web:${_IMAGE_TAG}'
       - '.'
 images:
-  - 'us-central1-docker.pkg.dev/${PROJECT_ID}/rateguard/rateguard-web:${_IMAGE_TAG}'
+  - 'us-central1-docker.pkg.dev/${PROJECT_ID}/rateguard-images/rateguard-web:${_IMAGE_TAG}'
 substitutions:
   _NEXT_PUBLIC_RATEGUARD_API_URL: 'http://localhost:8000'
   # Public Firebase web config (not secrets); supplied by the deploy script.

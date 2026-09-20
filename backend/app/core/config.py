@@ -48,6 +48,10 @@ class Settings(BaseSettings):
     # from at request time (never logged).
     rating_engine_connector_auth_header_name: str | None = None
     rating_engine_connector_auth_token_env_var: str | None = None
+    # "none" (default) | "google_id_token": attach a Google-signed ID token
+    # (audience = the connector's base URL) minted from the runtime service
+    # account via ADC, for a private Cloud Run target. No secret is stored.
+    rating_engine_connector_auth_mode: str = "none"
 
     # Which routes this process serves. The API and worker share one image
     # (locked doc 12.1) but must not share a surface: `api` serves the

@@ -26,6 +26,7 @@ import asyncio
 import json
 import logging
 import os
+import time
 import uuid
 from collections.abc import Awaitable, Callable
 from typing import Any
@@ -42,6 +43,24 @@ from app.connectors.retry import MAX_ATTEMPTS, compute_backoff_delay
 from app.connectors.security import enforce_https_or_local_dev, resolve_and_validate_host
 
 logger = logging.getLogger(__name__)
+
+_ID_TOKEN_TTL_SECONDS = 45 * 60
+_id_token_cache: dict[str, tuple[float, str]] = {}
+
+
+def _fetch_google_id_token(audience: str) -> str:
+    """Mints (and briefly caches) a Google ID token for `audience` from the
+    runtime identity via ADC. Blocking; call via `asyncio.to_thread`."""
+    now = time.monotonic()
+    cached = _id_token_cache.get(audience)
+    if cached and now - cached[0] < _ID_TOKEN_TTL_SECONDS:
+        return cached[1]
+    import google.auth.transport.requests
+    from google.oauth2 import id_token
+
+    token = id_token.fetch_id_token(google.auth.transport.requests.Request(), audience)
+    _id_token_cache[audience] = (now, token)
+    return token
 
 # Locked doc section 8.2 exact numbers.
 CONNECT_TIMEOUT_SECONDS = 3.0
@@ -190,6 +209,30 @@ class ConnectorClient:
             token = os.getenv(entry.auth_token_env_var)
             if token:
                 headers[entry.auth_header_name] = token
+
+        if entry.auth_mode == "google_id_token":
+            if entry.is_local_dev:
+                raise ConnectorException(
+                    code="CONNECTOR_AUTH_UNAVAILABLE",
+                    message="google_id_token auth is not permitted for a local-dev connector.",
+                    category=ConnectorFailureCategory.NON_RETRYABLE,
+                    correlation_id=correlation_id,
+                )
+            try:
+                id_tok = await asyncio.to_thread(_fetch_google_id_token, entry.base_url.rstrip("/"))
+            except Exception as exc:  # noqa: BLE001 - never leak credential/library text
+                logger.warning(
+                    "connector_id_token_unavailable correlation_id=%s error_type=%s",
+                    correlation_id,
+                    type(exc).__name__,
+                )
+                raise ConnectorException(
+                    code="CONNECTOR_AUTH_UNAVAILABLE",
+                    message="Could not obtain a service identity token for the connector target.",
+                    category=ConnectorFailureCategory.NON_RETRYABLE,
+                    correlation_id=correlation_id,
+                ) from None
+            headers["Authorization"] = f"Bearer {id_tok}"
 
         timeout = httpx.Timeout(
             connect=CONNECT_TIMEOUT_SECONDS,

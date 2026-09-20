@@ -54,6 +54,8 @@ class ConnectorRegistryEntry(BaseModel):
     # material without any code change once a real target requires it.
     auth_header_name: str | None = None
     auth_token_env_var: str | None = None
+    # "none" | "google_id_token" (see Settings.rating_engine_connector_auth_mode).
+    auth_mode: str = "none"
 
     def host_and_port(self) -> tuple[str, int]:
         parts = urlsplit(self.base_url)
@@ -117,6 +119,7 @@ def _build_registry() -> dict[str, ConnectorRegistryEntry]:
         is_local_dev=settings.rating_engine_connector_is_local_dev,
         auth_header_name=settings.rating_engine_connector_auth_header_name,
         auth_token_env_var=settings.rating_engine_connector_auth_token_env_var,
+        auth_mode=settings.rating_engine_connector_auth_mode,
     )
     return {demo_entry.connector_id: demo_entry}
 

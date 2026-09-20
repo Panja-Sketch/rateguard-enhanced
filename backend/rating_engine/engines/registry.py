@@ -10,19 +10,21 @@ service itself serves.
 from functools import lru_cache
 from pathlib import Path
 
+from app.core.config import get_data_dir
 from app.ipir.v0_2.package import IPIRPackageV2
 
-_REPO_ROOT = Path(__file__).resolve().parent.parent.parent.parent
+# Resolved via the shared data-dir logic (RATEGUARD_DATA_DIR, repo-root data/,
+# or the container's /app/data) rather than a fixed number of parent hops,
+# which points outside the image once packaged.
+_DATA_DIR = get_data_dir()
 
 ENGINE_FIXTURE_PATHS: dict[str, Path] = {
-    "canonical-v1": _REPO_ROOT
-    / "data"
+    "canonical-v1": _DATA_DIR
     / "implementations"
     / "v0_2"
     / "canonical"
     / "AZ_HO3_GOLDEN_ipir.json",
-    "defective-v1": _REPO_ROOT
-    / "data"
+    "defective-v1": _DATA_DIR
     / "implementations"
     / "v0_2"
     / "defective"

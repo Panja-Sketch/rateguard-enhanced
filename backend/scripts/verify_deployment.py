@@ -24,7 +24,7 @@ Usage:
     python scripts/verify_deployment.py --live \\
         --api-url https://rateguard-api-xxx.a.run.app \\
         --worker-url https://rateguard-worker-xxx.a.run.app \\
-        --project rateguard-ai --region us-central1
+        --project rateguard-enhanced --region us-central1
 """
 
 import argparse

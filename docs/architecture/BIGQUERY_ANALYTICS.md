@@ -23,7 +23,7 @@ LocalPortfolioRepository   BigQueryPortfolioRepository
 
 ## 2. BigQuery Dataset & Tables
 
-- **Project:** `rateguard-ai`
+- **Project:** `rateguard-enhanced`
 - **Dataset:** `rateguard` (Location: `US`)
 - **Portfolio Table:** `rateguard.synthetic_policies`
   - `policy_id` (STRING)

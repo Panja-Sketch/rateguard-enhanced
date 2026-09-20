@@ -63,7 +63,7 @@ def get_run_store(*, strict: bool = False) -> BaseRunStore:
 
     if strict:
         if _global_strict_run_store is None:
-            project_id = os.getenv("RATEGUARD_GOOGLE_CLOUD_PROJECT", "rateguard-ai")
+            project_id = os.getenv("RATEGUARD_GOOGLE_CLOUD_PROJECT", "rateguard-enhanced")
             db_id = os.getenv("RATEGUARD_FIRESTORE_DATABASE")
             kwargs: dict[str, Any] = {"project_id": project_id, "database_id": db_id, "fallback_on_error": False}
             if collection_name:
@@ -72,7 +72,7 @@ def get_run_store(*, strict: bool = False) -> BaseRunStore:
         return _global_strict_run_store
 
     if _global_run_store is None:
-        project_id = os.getenv("RATEGUARD_GOOGLE_CLOUD_PROJECT", "rateguard-ai")
+        project_id = os.getenv("RATEGUARD_GOOGLE_CLOUD_PROJECT", "rateguard-enhanced")
         db_id = os.getenv("RATEGUARD_FIRESTORE_DATABASE")
         kwargs = {"project_id": project_id, "database_id": db_id}
         if collection_name:

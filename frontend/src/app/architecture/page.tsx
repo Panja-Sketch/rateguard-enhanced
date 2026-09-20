@@ -58,7 +58,7 @@ export default function ArchitecturePage() {
     {
       title: 'Cloud Storage (GCS)',
       category: 'Artifact Management',
-      desc: 'Stores pricing source files, compiled IPIR AST models, semantic diff reports, and execution traces in gs://rateguard-ai-artifacts.',
+      desc: 'Stores pricing source files, compiled IPIR AST models, semantic diff reports, and execution traces in gs://rateguard-enhanced-artifacts.',
       icon: Database,
       color: 'border-amber-500/50 bg-amber-950/30 text-amber-300',
     },

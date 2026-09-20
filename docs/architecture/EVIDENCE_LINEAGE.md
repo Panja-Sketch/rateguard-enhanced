@@ -9,7 +9,7 @@ RateGuard AI records typed evidence lineage records throughout the Mission V2 as
 RateGuard supports storage selection via the `RATEGUARD_RUN_STORE` environment variable:
 
 - `RATEGUARD_RUN_STORE=memory` (Default): Uses `InMemoryRunStore` for fast, isolated unit tests.
-- `RATEGUARD_RUN_STORE=firestore`: Uses `FirestoreRunStore` connecting to Google Cloud Firestore project `rateguard-ai` using Application Default Credentials (ADC).
+- `RATEGUARD_RUN_STORE=firestore`: Uses `FirestoreRunStore` connecting to Google Cloud Firestore project `rateguard-enhanced` using Application Default Credentials (ADC).
 
 ---
 

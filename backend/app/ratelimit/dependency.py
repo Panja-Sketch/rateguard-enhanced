@@ -63,7 +63,7 @@ def rate_limited(operation: str) -> Callable[..., None]:
                 headers={"Retry-After": "5"},
             ) from None
         if not decision.allowed:
-            logger.warning("RATE_LIMITED operation=%s corrupt=%s", operation, decision.corrupt_state)
+            logger.warning("RATE_LIMITED operation=%s reason=%s", operation, decision.reason or "limit_reached")
             raise HTTPException(
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,
                 detail={"code": "RATE_LIMITED", "message": "Too many requests. Please retry later."},

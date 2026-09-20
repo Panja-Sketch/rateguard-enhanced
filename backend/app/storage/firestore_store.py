@@ -52,7 +52,7 @@ class FirestoreRunStore(BaseRunStore):
 
     def __init__(
         self,
-        project_id: str = "rateguard-ai",
+        project_id: str = "rateguard-enhanced",
         database_id: str | None = None,
         fallback_on_error: bool = True,
         collection_name: str = DEFAULT_COLLECTION_NAME,

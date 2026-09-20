@@ -230,7 +230,7 @@ def test_ask_gemini_makes_no_attempt_once_budget_is_exhausted():
 
     fake = FakeGeminiClient()
     supervisor = AssuranceSupervisor(store, gemini_client=fake)
-    budget = _InvestigationBudget(gemini_call_count=MAX_GEMINI_CALLS_PER_MISSION)
+    budget = _InvestigationBudget(gemini_call_count=supervisor.agent_config.max_gemini_calls_per_mission)
 
     decision, evidence = supervisor._ask_gemini(
         mission.mission_id, budget, "PRIORITIZE_DIFFERENCES", DifferencePrioritizationDecision, "sys", "prompt"

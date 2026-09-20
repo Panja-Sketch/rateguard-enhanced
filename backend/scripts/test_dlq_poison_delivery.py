@@ -19,7 +19,7 @@ explicitly authorized; it is not a dry run.
 
 Usage:
     python scripts/test_dlq_poison_delivery.py --yes-poison-staging-dlq \\
-        --project rateguard-ai \\
+        --project rateguard-enhanced \\
         --topic assurance-runs-staging \\
         --dlq-subscription assurance-runs-staging-dlq-inspect
 """
@@ -35,7 +35,7 @@ STAGING_DLQ_SUBSCRIPTION_ALLOWLIST = ("assurance-runs-staging-dlq-inspect",)
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--yes-poison-staging-dlq", action="store_true", help="Required explicit opt-in.")
-    parser.add_argument("--project", required=False, default="rateguard-ai")
+    parser.add_argument("--project", required=False, default="rateguard-enhanced")
     parser.add_argument("--topic", required=False, default="assurance-runs-staging")
     parser.add_argument("--dlq-subscription", required=False, default="assurance-runs-staging-dlq-inspect")
     parser.add_argument("--poll-timeout-seconds", type=float, default=900.0)

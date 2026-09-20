@@ -230,10 +230,10 @@ def test_candidate_cloud_run_env_satisfies_the_startup_contract(role):
     summary = validate_startup_configuration(settings, env)
     assert summary["gemini_model"] == "gemini-3.1-flash-lite" and summary["vertex_ai_location"] == "us"
     # Guardrails and rate limits are explicitly configured, not left to defaults.
-    assert env["RATEGUARD_MAX_GEMINI_CALLS_PER_MISSION"] == "6"
-    assert env["RATEGUARD_MAX_PROBE_ROUNDS"] == "1"
-    assert env["RATEGUARD_LOW_CONFIDENCE_REVIEW_THRESHOLD"] == "0.60"
-    assert summary["guardrails"]["RATEGUARD_MAX_PROBE_ROUNDS"] == 1
+    assert env["RATEGUARD_MAX_GEMINI_CALLS_PER_MISSION"] == "10"
+    assert env["RATEGUARD_MAX_PROBE_ROUNDS"] == "3"
+    assert env["RATEGUARD_LOW_CONFIDENCE_REVIEW_THRESHOLD"] == "0.8"
+    assert summary["guardrails"]["RATEGUARD_MAX_PROBE_ROUNDS"] == 3
     assert env["RATEGUARD_RATE_LIMIT_ENABLED"] == "true"
     assert set(json.loads(env["RATEGUARD_RATE_LIMITS"])) == set(DEFAULT_POLICIES)
 
@@ -255,9 +255,9 @@ def test_production_baseline_env_file_satisfies_the_startup_contract():
     summary = validate_startup_configuration(settings, {k: str(v) for k, v in env.items()})
     assert summary["vertex_ai_location"] == "us"
     assert summary["guardrails"] == {
-        "RATEGUARD_MAX_GEMINI_CALLS_PER_MISSION": 6,
-        "RATEGUARD_MAX_PROBE_ROUNDS": 1,
-        "RATEGUARD_LOW_CONFIDENCE_REVIEW_THRESHOLD": 0.6,
+        "RATEGUARD_MAX_GEMINI_CALLS_PER_MISSION": 10,
+        "RATEGUARD_MAX_PROBE_ROUNDS": 3,
+        "RATEGUARD_LOW_CONFIDENCE_REVIEW_THRESHOLD": 0.8,
     }
 
 

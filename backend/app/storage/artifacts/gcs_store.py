@@ -23,8 +23,8 @@ class GCSArtifactStore(BaseArtifactStore):
 
     def __init__(
         self,
-        bucket_name: str = "rateguard-ai-artifacts",
-        project_id: str = "rateguard-ai",
+        bucket_name: str = "rateguard-enhanced-artifacts",
+        project_id: str = "rateguard-enhanced",
         fallback_on_error: bool = True,
     ) -> None:
         self.bucket_name = bucket_name

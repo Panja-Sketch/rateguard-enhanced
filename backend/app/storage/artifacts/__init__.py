@@ -14,8 +14,8 @@ def get_artifact_store() -> BaseArtifactStore:
     global _global_artifact_store
     store_type = os.getenv("RATEGUARD_ARTIFACT_STORE", "local").lower()
     if store_type == "gcs":
-        bucket = os.getenv("RATEGUARD_GCS_BUCKET", "rateguard-ai-artifacts")
-        project = os.getenv("RATEGUARD_GOOGLE_CLOUD_PROJECT", "rateguard-ai")
+        bucket = os.getenv("RATEGUARD_GCS_BUCKET", "rateguard-enhanced-artifacts")
+        project = os.getenv("RATEGUARD_GOOGLE_CLOUD_PROJECT", "rateguard-enhanced")
         return GCSArtifactStore(bucket_name=bucket, project_id=project)
 
     if _global_artifact_store is None:

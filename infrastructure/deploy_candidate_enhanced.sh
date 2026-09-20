@@ -11,8 +11,8 @@
 # authorized service accounts.
 #
 # This script deliberately does NOT exist for, and must never be pointed at,
-# the old `rateguard-ai` project -- see infrastructure/deploy.sh for that
-# project's (refused) legacy scripts.
+# the old `rateguard-ai` project. Its legacy deployment scripts were removed
+# from this repository (see git history).
 #
 # SAFETY: by default (no --deploy-candidate flag) this performs ZERO
 # gcloud/network calls -- it only runs `git rev-parse` (local) and prints the
@@ -199,9 +199,9 @@ write_candidate_env_file() {
 RATEGUARD_SERVICE_ROLE: "${role}"
 RATEGUARD_ENVIRONMENT: "candidate"
 RATEGUARD_AGENT_ENABLED: "true"
-RATEGUARD_MAX_GEMINI_CALLS_PER_MISSION: "6"
-RATEGUARD_MAX_PROBE_ROUNDS: "1"
-RATEGUARD_LOW_CONFIDENCE_REVIEW_THRESHOLD: "0.60"
+RATEGUARD_MAX_GEMINI_CALLS_PER_MISSION: "10"
+RATEGUARD_MAX_PROBE_ROUNDS: "3"
+RATEGUARD_LOW_CONFIDENCE_REVIEW_THRESHOLD: "0.8"
 GOOGLE_GENAI_USE_VERTEXAI: "true"
 GOOGLE_CLOUD_PROJECT: "${PROJECT_ID}"
 GOOGLE_CLOUD_LOCATION: "${VERTEX_AI_LOCATION}"

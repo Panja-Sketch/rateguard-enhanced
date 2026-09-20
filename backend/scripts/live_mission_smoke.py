@@ -19,7 +19,7 @@ Explicitly does NOT touch:
 
 Usage (requires explicit opt-in — the script refuses to run without it):
 
-    GOOGLE_GENAI_USE_VERTEXAI=true GOOGLE_CLOUD_PROJECT=rateguard-ai \\
+    GOOGLE_GENAI_USE_VERTEXAI=true GOOGLE_CLOUD_PROJECT=rateguard-enhanced \\
         GOOGLE_CLOUD_LOCATION=global python scripts/live_mission_smoke.py --yes-live-call
 
 Prints a summary covering every item the full-mission verification requires:

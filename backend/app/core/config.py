@@ -11,7 +11,7 @@ class Settings(BaseSettings):
     app_version: str = "0.1.0"
     environment: str = "development"
     debug: bool = True
-    google_cloud_project: str = "rateguard-ai"
+    google_cloud_project: str = "rateguard-enhanced"
     google_cloud_region: str = "us-central1"
     log_level: str = "INFO"
 
@@ -100,7 +100,7 @@ def get_data_dir() -> Path:
 
     Checks:
     1. RATEGUARD_DATA_DIR environment variable via Settings
-    2. Repository root data directory (.../rateguard-ai/data)
+    2. Repository root data directory (.../rateguard-enhanced/data)
     3. Container /app/data directory
     """
     settings = get_settings()

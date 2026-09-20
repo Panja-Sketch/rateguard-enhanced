@@ -132,6 +132,15 @@ def test_corrupt_counter_state_returns_429_not_a_free_pass(api, auth_env, monkey
     assert r.status_code == 429 and r.headers["retry-after"] == "42"
 
 
+def test_contention_fallback_is_a_429_with_retry_after_never_a_5xx(api, auth_env, monkeypatch):
+    from app.ratelimit import RateDecision
+
+    monkeypatch.setattr(auth_env["limiter"], "hit", lambda *a, **k: RateDecision(False, 0, 1, reason="contention"))
+    r = api.post("/api/v1/missions", json={}, headers=bearer("owner-token"))
+    assert r.status_code == 429 and r.headers["retry-after"] == "1"
+    assert r.json()["detail"]["code"] == "RATE_LIMITED"
+
+
 def test_disabling_is_possible_locally_but_startup_forbids_it_when_deployed():
     validate_startup_configuration(Settings(firebase_project_id="p", rate_limit_enabled=False), GOOD_ENV)
     with pytest.raises(RuntimeConfigError, match="RATE_LIMIT_ENABLED"):

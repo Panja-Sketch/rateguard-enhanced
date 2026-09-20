@@ -33,9 +33,9 @@ RATEGUARD_CORS_ORIGINS: '["http://localhost:3000"]'
 RATEGUARD_AGENT_ENABLED: "true"
 # Operational guardrails (validated at startup): Gemini call cap per mission,
 # adaptive probe-round cap, extraction confidence below which review is forced.
-RATEGUARD_MAX_GEMINI_CALLS_PER_MISSION: "6"
-RATEGUARD_MAX_PROBE_ROUNDS: "1"
-RATEGUARD_LOW_CONFIDENCE_REVIEW_THRESHOLD: "0.60"
+RATEGUARD_MAX_GEMINI_CALLS_PER_MISSION: "10"
+RATEGUARD_MAX_PROBE_ROUNDS: "3"
+RATEGUARD_LOW_CONFIDENCE_REVIEW_THRESHOLD: "0.8"
 GOOGLE_GENAI_USE_VERTEXAI: "true"
 GOOGLE_CLOUD_PROJECT: "rateguard-enhanced"
 GOOGLE_CLOUD_LOCATION: "us"

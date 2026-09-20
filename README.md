@@ -225,10 +225,9 @@ npm test
 
 Deployment to Google Cloud Run follows a staged pipeline, implemented in `infrastructure/`:
 
-1. `deploy_candidate.sh --deploy-candidate` builds an immutable image and deploys it as a `--no-traffic --tag candidate` revision against fully isolated staging Pub/Sub/Firestore/BigQuery/GCS resources.
+1. `deploy_candidate_enhanced.sh --deploy-candidate` builds an immutable image and deploys it as a `--no-traffic --tag candidate` revision against fully isolated staging Pub/Sub/Firestore/BigQuery/GCS resources.
 2. `backend/scripts/verify_candidate.py --yes-test-candidate` exercises the candidate end-to-end (mission lifecycle, structured validation, CORS) against those isolated resources.
-3. `deploy_release.sh --deploy-release --image-digest=<verified digest>` promotes the exact verified image to `--no-traffic --tag release` revisions using production resource names, still at 0% traffic.
-4. Traffic is shifted deliberately via targeted `gcloud run services update-traffic` commands, gated by a staging-name guard (`infrastructure/check_production_config.sh`) that refuses to proceed if a revision resolves to any staging-named resource.
+3. Promotion is a separate, deliberate step (not part of candidate deployment): the exact verified image digest is deployed with the environment in `infrastructure/runtime-env.rateguard-enhanced.yaml`, then traffic is shifted via targeted `gcloud run services update-traffic` commands (rollback: `infrastructure/rollback.sh`), gated by a staging-name guard (`infrastructure/check_production_config.sh`) that refuses to proceed if a revision resolves to any staging-named resource.
 
 ## Demo Steps
 
@@ -331,7 +330,7 @@ frontend/            Next.js 14 (App Router) + TypeScript + Tailwind web UI
   src/components/     Assurance UI components (diff viewer, impact graph, evidence lineage, ...)
   src/lib/            API client and shared types
   public/samples/     Downloadable IPIR JSON source templates (clean + intentional-drift pair)
-infrastructure/      Deploy/rollback/promotion scripts and production runtime config
+infrastructure/      Enhanced candidate deploy + rollback scripts, Firestore rules/indexes, runtime config
 docs/
   architecture/       Per-subsystem architecture specifications
   demo/               Demo kit and acceptance test guide

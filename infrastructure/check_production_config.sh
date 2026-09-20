@@ -6,7 +6,7 @@
 # the given service) and FAILS if any environment variable VALUE contains
 # the substring "-staging" or "_staging". This is the exact failure mode
 # that let rateguard-api/rateguard-worker run in "production" against
-# assurance-runs-staging / rateguard_staging / rateguard-ai-artifacts-staging
+# assurance-runs-staging / rateguard_staging / rateguard-enhanced-artifacts-staging
 # undetected -- this script exists so that can never happen silently again.
 #
 # Usage:

@@ -58,7 +58,7 @@ client = TestClient(_build_app(CANDIDATE_DEPLOYMENT_ORIGINS))
 def test_cors_origins_env_var_is_a_json_array_parsed_by_settings(monkeypatch) -> None:
     """The exact RATEGUARD_CORS_ORIGINS environment-variable contract:
     pydantic-settings parses it as a JSON array string into
-    Settings.cors_origins (see infrastructure/runtime-env.yaml)."""
+    Settings.cors_origins (see infrastructure/runtime-env.rateguard-enhanced.yaml)."""
     monkeypatch.setenv(
         "RATEGUARD_CORS_ORIGINS",
         json.dumps(["http://localhost:3000", PRODUCTION_ORIGIN, CANDIDATE_ORIGIN]),

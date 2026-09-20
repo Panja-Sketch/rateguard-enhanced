@@ -9,7 +9,7 @@ RateGuard AI stores source files, compiled IPIR packages, test suites, execution
 ## Artifact Storage Model
 
 ```
-gcs://rateguard-ai-artifacts/  (or local RATEGUARD_ARTIFACT_DIR)
+gcs://rateguard-enhanced-artifacts/  (or local RATEGUARD_ARTIFACT_DIR)
 ├── sources/
 │   └── json/       # Raw uploaded actuarial JSON specs (the only format
 │                   # accepted today -- .xlsx/.pdf uploads are rejected
@@ -27,7 +27,7 @@ gcs://rateguard-ai-artifacts/  (or local RATEGUARD_ARTIFACT_DIR)
 | :--- | :--- | :--- |
 | `RATEGUARD_ARTIFACT_STORE` | `local` | Store provider: `local` or `gcs` |
 | `RATEGUARD_ARTIFACT_DIR` | `./data/artifacts` | Directory for local artifact storage |
-| `RATEGUARD_GCS_BUCKET` | `rateguard-ai-artifacts` | Target GCS bucket for cloud storage |
+| `RATEGUARD_GCS_BUCKET` | `rateguard-enhanced-artifacts` | Target GCS bucket for cloud storage |
 
 ---
 

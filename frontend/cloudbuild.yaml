@@ -34,8 +34,8 @@ substitutions:
   _NEXT_PUBLIC_FIREBASE_APP_ID: ''
   _NEXT_PUBLIC_FIREBASE_MEASUREMENT_ID: ''
   # Default preserves the existing production build behavior exactly
-  # (deploy.ps1/deploy.sh never pass _IMAGE_TAG). A candidate/staging build
+  # (no deploy script other than a candidate deploy passes _IMAGE_TAG). A candidate/staging build
   # passes an immutable tag derived from the git commit SHA instead, and
   # bakes in the candidate-tagged API URL via _NEXT_PUBLIC_RATEGUARD_API_URL
-  # — see infrastructure/deploy_candidate.sh.
+  # — see infrastructure/deploy_candidate_enhanced.sh.
   _IMAGE_TAG: 'latest'

@@ -1,6 +1,7 @@
 import asyncio
 import hashlib
 import json
+import logging
 import time
 import uuid
 from collections.abc import Callable, Sequence
@@ -45,10 +46,13 @@ from app.engines.impact.models import ImpactAnalysis
 from app.engines.oracle.calculator import PremiumOracleCalculator
 from app.engines.oracle.errors import CalculationDateError
 from app.engines.portfolio import PortfolioExposureAnalyzer
+from app.engines.portfolio.consumer_protection import CohortDistributionResult, PipelineImpactResult
 from app.engines.reconciliation import PricingReconciliationEngine
 from app.engines.testing import RiskDirectedTestGenerator
 from app.engines.testing.models import PricingTestScenario, ScenarioClassification
 from app.explanations import build_explanation_draft, build_explanation_facts
+from app.impact.aggregate import ImpactAggregate
+from app.impact.models import ImpactStatus
 from app.ipir.package import IPIRPackage
 from app.ipir.schema import validate_ipir_schema
 from app.ipir.v0_2.control_cases import ControlCase
@@ -131,6 +135,9 @@ class _InvestigationBudget:
     any_gemini_attempted: bool = False
     evidence_ids: list[str] = dc_field(default_factory=list)
     executed_test_ids: set[str] = dc_field(default_factory=set)
+
+
+_logger = logging.getLogger(__name__)
 
 
 class AssuranceSupervisor:
@@ -319,6 +326,9 @@ class AssuranceSupervisor:
         whether it was a real Gemini decision or a deterministic fallback.
         `model_id`/`invocation_id` are only ever stamped when `is_gemini` is True
         and backed by a real successful invocation."""
+        if not is_gemini:
+            # Metric source (log-based, low cardinality): no tenant/mission ids.
+            _logger.warning("GEMINI_FALLBACK decision_type=%s reason=%s", decision_type, fallback_reason or "UNSPECIFIED")
         return AgentAction(
             action_id=f"ACT-{uuid.uuid4().hex[:6].upper()}",
             agent_role=agent_role,
@@ -507,6 +517,8 @@ class AssuranceSupervisor:
         target_connector: ConnectorSelection | None = None,
         cancellation_check: "Callable[[], bool] | None" = None,
         control_cases: "Sequence[ControlCase] | None" = None,
+        impact_runner: "Any | None" = None,
+        source_compatibility_notice: str | None = None,
     ) -> AssuranceResultV2:
         control_cases = list(control_cases or [])
         agent_actions: list[AgentAction] = []
@@ -592,6 +604,8 @@ class AssuranceSupervisor:
         # mismatch between the two compiled sources must surface as its own
         # signal, never be silently absorbed into "0 semantic differences".
         review_reasons: list[str] = []
+        if source_compatibility_notice:
+            review_reasons.append("REUPLOAD_REQUIRED: " + source_compatibility_notice)
         if compilation_uncertain:
             review_reasons.append("Source extraction confidence was flagged for human review.")
         if right_pkg is not None:
@@ -1261,7 +1275,7 @@ class AssuranceSupervisor:
                 if target_connector is not None:
                     act_prem, status = _quote_via_connector(tc, calc_date, calc_source)
                     if act_prem is None:
-                        outcome, reason = "INCONCLUSIVE", f"CONNECTOR_{status}"
+                        outcome, reason = "INCONCLUSIVE", (status if status.startswith("CONNECTOR_") else f"CONNECTOR_{status}")
                 elif target_calc:
                     act_prem = target_calc.calculate_policy_premium(
                         tc.risk_values, effective_date=tc.effective_date, transaction_type=tc.transaction_type
@@ -1551,7 +1565,81 @@ class AssuranceSupervisor:
                     evidence, is_gemini=False, fallback_reason=reason,
                 ))
 
-        if right_pkg and run_portfolio:
+        # Connector-backed portfolio impact (Prompt 8): authoritative IPIR expected
+        # premium vs. the connector's candidate premium for every eligible masked
+        # portfolio row, executed as durable checkpointed batches. Never inferred
+        # from missing data: only an actual scan populates these sections.
+        connector_impact: ImpactAggregate | None = None
+        connector_impact_note: str | None = None
+        if target_connector is not None and impact_runner is not None:
+            if not connector_probe_outcomes or connector_all_probes_failed:
+                connector_impact_note = (
+                    "Portfolio repricing was not attempted: every connector probe failed to return a premium, "
+                    "so the connector is treated as unavailable."
+                )
+            else:
+                connector_impact = impact_runner.run(
+                    mission=mission,
+                    package=left_pkg,
+                    connector_id=target_connector.connector_id,
+                    engine_version=target_connector.engine_version,
+                    cancellation_check=lambda: self._is_cancelled(mission.mission_id, cancellation_check),
+                )
+                if connector_impact.status == ImpactStatus.CANCELLED:
+                    return self._finalize_cancelled(mission, result, agent_actions, recorder)
+
+        if connector_impact is not None:
+            imp = connector_impact
+            port_duration = max(0.001, time.time() - port_start)
+            result.blast_radius = SectionResult(
+                status=AnalysisStatus.SUCCEEDED,
+                reason=None if imp.completeness == "COMPLETE" else (
+                    "PARTIAL: " + "; ".join(imp.incomplete_reasons or ["scan incomplete"])
+                ),
+                data=BlastRadiusResult(
+                    total_policies_analyzed=imp.processed_policies,
+                    semantically_exposed_count=imp.successful_comparisons,
+                    behaviorally_affected_count=0,
+                    financially_affected_count=imp.mismatches,
+                    undercharged_policy_count=imp.undercharge_count,
+                    overcharged_policy_count=imp.overcharge_count,
+                    total_undercharge_amount=imp.undercharge_total,
+                    total_overcharge_amount=imp.overcharge_total,
+                    signed_net_variance=imp.signed_net_delta,
+                    absolute_financial_exposure=imp.absolute_exposure,
+                    portfolio_execution_seconds=round(port_duration, 3),
+                    measured_throughput_policies_per_sec=round(imp.processed_policies / port_duration, 1),
+                ),
+            )
+            result.connector_impact = SectionResult(status=AnalysisStatus.SUCCEEDED, data=imp)
+            self.store.add_evidence(mission.mission_id, EvidenceRecord(
+                evidence_id=f"EV-{uuid.uuid4().hex[:6].upper()}",
+                run_id=mission.mission_id,
+                evidence_type=EvidenceType.PORTFOLIO_EXPOSURE,
+                title=f"Connector portfolio impact ({imp.status.value})",
+                description="Aggregate-only connector-backed repricing result; no policy rows or identifiers.",
+                data_summary=imp.model_dump(mode="json", exclude={"mismatch_examples", "cohort_distribution", "pipeline_impact"}),
+            ))
+            agent_actions.append(AgentAction(
+                action_id=f"ACT-{uuid.uuid4().hex[:6].upper()}",
+                agent_role="Portfolio Exposure Analyst",
+                action_type="TOOL_INVOCATION",
+                summary=(
+                    f"Connector-backed impact {imp.status.value}: {imp.successful_comparisons} of "
+                    f"{imp.eligible_policies} eligible policies compared, {imp.mismatches} mismatched."
+                ),
+                rationale="Authoritative IPIR expected premium compared with the connector's candidate premium per masked row.",
+                selected_tool="connector_portfolio_impact",
+                latency_ms=port_duration * 1000,
+            ))
+            if imp.completeness == "COMPLETE":
+                recorder.record(MissionStage.PORTFOLIO_IMPACT, StageStatus.COMPLETED)
+            else:
+                recorder.record(
+                    MissionStage.PORTFOLIO_IMPACT, StageStatus.REVIEW_REQUIRED,
+                    reason="Connector impact scan incomplete: " + "; ".join(imp.incomplete_reasons or ["see impact evidence"]),
+                )
+        elif right_pkg and run_portfolio:
             raw_port = self.portfolio_analyzer.evaluate_portfolio(
                 left_package=left_pkg,
                 right_package=right_pkg,
@@ -1604,17 +1692,24 @@ class AssuranceSupervisor:
         else:
             result.blast_radius = SectionResult(
                 status=AnalysisStatus.NOT_RUN,
-                reason="Portfolio blast radius evaluation requires a full IPIR target package or accessible portfolio batch execution.",
-            )
-            recorder.record(
-                MissionStage.PORTFOLIO_IMPACT, StageStatus.NOT_APPLICABLE,
                 reason=(
-                    "A live connector target does not produce a batch-evaluable IPIR package; portfolio "
-                    "blast-radius scanning against a connector target is out of scope for this session."
-                    if target_connector is not None
-                    else "Portfolio blast radius evaluation requires a full IPIR target package."
+                    connector_impact_note
+                    or "Portfolio blast radius evaluation requires a full IPIR target package or accessible portfolio batch execution."
                 ),
             )
+            if connector_impact_note is not None:
+                result.connector_impact = SectionResult(status=AnalysisStatus.NOT_RUN, reason=connector_impact_note)
+                recorder.record(MissionStage.PORTFOLIO_IMPACT, StageStatus.REVIEW_REQUIRED, reason=connector_impact_note)
+            else:
+                recorder.record(
+                    MissionStage.PORTFOLIO_IMPACT, StageStatus.NOT_APPLICABLE,
+                    reason=(
+                        "No connector impact runner is configured for this execution; portfolio scanning of a "
+                        "connector target was not performed."
+                        if target_connector is not None
+                        else "Portfolio blast radius evaluation requires a full IPIR target package."
+                    ),
+                )
 
         # STAGE 6b/6c: Consumer-protection analytics (locked doc section 9) --
         # computed from the same per-policy repricing pass the portfolio scan
@@ -1622,6 +1717,13 @@ class AssuranceSupervisor:
         # not run (waived, unavailable target, or connector-backed mission).
         if raw_port is not None and raw_port.cohort_distribution is not None:
             result.cohort_distribution = SectionResult(status=AnalysisStatus.SUCCEEDED, data=raw_port.cohort_distribution)
+            recorder.record(MissionStage.COHORT_DISTRIBUTION, StageStatus.COMPLETED)
+        elif connector_impact is not None and connector_impact.cohort_distribution is not None:
+            result.cohort_distribution = SectionResult(
+                status=AnalysisStatus.SUCCEEDED,
+                reason=None if connector_impact.completeness == "COMPLETE" else "Computed over the compared subset only (scan incomplete).",
+                data=CohortDistributionResult.model_validate(connector_impact.cohort_distribution),
+            )
             recorder.record(MissionStage.COHORT_DISTRIBUTION, StageStatus.COMPLETED)
         else:
             result.cohort_distribution = SectionResult(
@@ -1635,6 +1737,13 @@ class AssuranceSupervisor:
 
         if raw_port is not None and raw_port.pipeline_impact is not None:
             result.pipeline_impact = SectionResult(status=AnalysisStatus.SUCCEEDED, data=raw_port.pipeline_impact)
+            recorder.record(MissionStage.PIPELINE_IMPACT, StageStatus.COMPLETED)
+        elif connector_impact is not None and connector_impact.pipeline_impact is not None:
+            result.pipeline_impact = SectionResult(
+                status=AnalysisStatus.SUCCEEDED,
+                reason=None if connector_impact.completeness == "COMPLETE" else "Computed over the compared subset only (scan incomplete).",
+                data=PipelineImpactResult.model_validate(connector_impact.pipeline_impact),
+            )
             recorder.record(MissionStage.PIPELINE_IMPACT, StageStatus.COMPLETED)
         else:
             result.pipeline_impact = SectionResult(
@@ -1944,7 +2053,30 @@ class AssuranceSupervisor:
         blocking_reasons: list[str] = []
         if mismatch_count > 0:
             blocking_reasons.append(f"{mismatch_count} price calculation mismatches reproduced.")
-        if result.blast_radius.data and float(result.blast_radius.data.absolute_financial_exposure) > 0:
+        if connector_impact is not None:
+            imp = connector_impact
+            if imp.mismatches > 0:
+                bound = (
+                    f" (a lower bound: only {imp.coverage_pct}% of eligible policies were compared)"
+                    if imp.exposure_is_lower_bound else ""
+                )
+                blocking_reasons.append(
+                    f"Connector-backed portfolio repricing found {imp.mismatches} policies priced differently by "
+                    f"connector '{target_connector.connector_id}@{target_connector.engine_version}'; absolute exposure "
+                    f"${imp.absolute_exposure}{bound}."
+                )
+            elif imp.completeness != "COMPLETE":
+                review_reasons.append(
+                    f"Connector portfolio impact is {imp.status.value} (coverage {imp.coverage_pct}%, "
+                    f"{imp.inconclusive} inconclusive, {imp.unprocessed_policies} unprocessed): "
+                    + "; ".join(imp.incomplete_reasons or ["incomplete"])
+                    + ". No mismatch was proven, but zero impact cannot be inferred from incomplete data."
+                )
+                review_required = True
+        elif connector_impact_note is not None:
+            review_reasons.append(connector_impact_note)
+            review_required = True
+        elif result.blast_radius.data and float(result.blast_radius.data.absolute_financial_exposure) > 0:
             blocking_reasons.append(f"Financial exposure of ${result.blast_radius.data.absolute_financial_exposure} exceeds zero-drift tolerance.")
         if sem_diffs:
             blocking_reasons.append(f"{len(sem_diffs)} AST semantic differences identified.")

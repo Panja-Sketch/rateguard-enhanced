@@ -419,6 +419,17 @@ class FirestoreRunStore(BaseRunStore):
                 raise
             return False
 
+    def touch_heartbeat(self, run_id: str) -> None:
+        if self._db is None:
+            return self._fallback_store.touch_heartbeat(run_id)
+        now = datetime.now(UTC).isoformat()
+        try:
+            self._db.collection(self.collection_name).document(run_id).update({"metadata.last_heartbeat_at": now})
+        except Exception as e:
+            logger.error("Firestore error in touch_heartbeat for '%s': %s", run_id, e)
+            if not self.fallback_on_error:
+                raise
+
     def acquire_lease(
         self, run_id: str, job_id: str, lease_seconds: int = LEASE_TTL_SECONDS
     ) -> tuple[LeaseOutcome, AssuranceRunRecord | None]:

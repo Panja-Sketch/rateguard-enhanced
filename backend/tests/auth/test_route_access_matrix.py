@@ -40,6 +40,8 @@ MATRIX: dict[tuple[str, str], set[Role]] = {
     ("GET", "/api/v1/missions/{mission_id}"): ALL,
     ("GET", "/api/v1/missions/{mission_id}/evidence"): ALL,
     ("GET", "/api/v1/missions/{mission_id}/evidence/download"): DOWNLOAD,
+    ("GET", "/api/v1/missions/{mission_id}/evidence/bundle"): DOWNLOAD,
+    ("GET", "/api/v1/missions/{mission_id}/impact"): ALL,
     ("GET", "/api/v1/missions/{mission_id}/connector-evidence"): ALL,
     ("POST", "/api/v1/missions/{mission_id}/alignment-options"): WRITE,
     ("POST", "/api/v1/missions/{mission_id}/cancel"): WRITE,
@@ -58,7 +60,7 @@ PUBLIC = {
     ("GET", "/health/live"),
     ("GET", "/health/ready"),
 }
-WORKER = {("POST", "/internal/pubsub/assurance")}
+WORKER = {("POST", "/internal/pubsub/assurance"), ("POST", "/internal/pubsub/impact-batch")}
 
 
 def _declared_roles(route: APIRoute) -> set[Role] | None:

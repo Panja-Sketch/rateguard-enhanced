@@ -18,6 +18,7 @@ for _forbidden in (
 os.environ["RATEGUARD_GEMINI_MODEL"] = "gemini-3.1-flash-lite"
 os.environ["VERTEX_AI_LOCATION"] = "us"
 os.environ["RATEGUARD_FIREBASE_PROJECT_ID"] = "rateguard-test"
+os.environ.setdefault("RATEGUARD_IMPACT_POLL_INTERVAL_SECONDS", "0.05")
 os.environ["RATEGUARD_ENV_FILE"] = os.path.join(tempfile.gettempdir(), "rateguard-tests-no-such.env")
 
 from collections.abc import Generator  # noqa: E402
@@ -85,3 +86,51 @@ def firestore_emulator_db():
     from google.cloud import firestore
 
     return firestore.Client(project="demo-rateguard-tests")
+
+
+@pytest.fixture(autouse=True)
+def _connector_impact_uses_in_process_rating_engine() -> Generator[None, None, None]:
+    """Connector-backed impact scans in API-level tests hit the real demo rating
+    engine over an in-process ASGI transport (no socket), with an in-memory
+    checkpoint store."""
+    import httpx
+
+    from app.connectors.client import ConnectorClient
+    from app.impact.runtime import set_connector_client_factory
+    from app.impact.store import InMemoryImpactStore, set_impact_store
+    from rating_engine.main import app as engine_app
+
+    async def _no_sleep(_: float) -> None:
+        return None
+
+    # A small (1,200-row) slice of the real portfolio keeps API-level runs fast;
+    # the full 50k scan has its own dedicated tests.
+    import csv
+    from pathlib import Path
+
+    from app.impact import snapshot as snapshot_mod
+
+    real = snapshot_mod._resolve_path(snapshot_mod.DEFAULT_DATASET)
+    small = Path(tempfile.gettempdir()) / "rateguard-tests-portfolio-1200.csv"
+    if not small.exists():
+        with open(real, encoding="utf-8") as src, open(small, "w", encoding="utf-8", newline="") as dst:
+            reader = csv.reader(src)
+            writer = csv.writer(dst)
+            for i, row in enumerate(reader):
+                if i > 1200:
+                    break
+                writer.writerow(row)
+    original_resolve = snapshot_mod._resolve_path
+    snapshot_mod._resolve_path = lambda dataset: small
+    snapshot_mod.clear_snapshot_cache()
+
+    transport = httpx.ASGITransport(app=engine_app)
+    set_impact_store(InMemoryImpactStore())
+    set_connector_client_factory(
+        lambda on_retry=None: ConnectorClient(transport=transport, sleep_fn=_no_sleep, on_retry=on_retry)
+    )
+    yield
+    snapshot_mod._resolve_path = original_resolve
+    snapshot_mod.clear_snapshot_cache()
+    set_connector_client_factory(None)
+    set_impact_store(None)

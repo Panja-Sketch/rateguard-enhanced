@@ -1,6 +1,7 @@
 import base64
 import json
 import logging
+import uuid
 from typing import Any
 
 from fastapi import APIRouter, Response
@@ -101,3 +102,38 @@ def process_pubsub_assurance_job(envelope: PubSubPushEnvelope, response: Respons
         "decision": result.decision,
         "status_write_ok": result.status_write_ok,
     }
+
+
+@router.post("/impact-batch")
+def process_pubsub_impact_batch(envelope: PubSubPushEnvelope, response: Response) -> dict[str, Any]:
+    """Internal endpoint for one connector-impact batch delivery.
+
+    Same authenticated Pub/Sub push boundary as `/assurance`. The batch
+    handler is idempotent (leased, fenced checkpoint), so:
+    - any recorded outcome (done, incomplete with retained partial results,
+      duplicate, closed job, exhausted attempts) is ACKed (2xx);
+    - only an unexpected infrastructure failure returns 503 so Pub/Sub
+      redelivers (and eventually dead-letters) the batch.
+    """
+    from app.impact.dispatch import decode_batch_message
+    from app.impact.runtime import process_batch_message
+
+    try:
+        msg = decode_batch_message(base64.b64decode(envelope.message.data))
+    except Exception as e:  # noqa: BLE001
+        logger.error("POISON_MESSAGE: Failed to decode impact-batch envelope: %s", safe_error_text(e))
+        response.status_code = OUTCOME_HTTP_STATUS[ProcessingOutcome.TERMINAL_INVALID_MESSAGE]
+        return {"status": ProcessingOutcome.TERMINAL_INVALID_MESSAGE.value, "error": "Invalid impact-batch message."}
+
+    owner = f"push-{envelope.message.message_id or uuid.uuid4().hex[:12]}"
+    try:
+        outcome = process_batch_message(msg.tenant_id, msg.job_id, msg.batch_no, owner)
+    except Exception as e:  # noqa: BLE001 - infrastructure failure: let Pub/Sub retry
+        logger.exception(
+            "IMPACT_BATCH_UNEXPECTED_EXCEPTION job=%s batch=%s: %s", msg.job_id, msg.batch_no, safe_error_text(e)
+        )
+        response.status_code = OUTCOME_HTTP_STATUS[ProcessingOutcome.RETRYABLE_FAILURE]
+        return {"status": ProcessingOutcome.RETRYABLE_FAILURE.value, "error": "Unexpected batch failure."}
+
+    response.status_code = 200
+    return {"status": outcome, "job_id": msg.job_id, "batch_no": msg.batch_no}

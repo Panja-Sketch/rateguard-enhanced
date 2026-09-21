@@ -252,12 +252,32 @@ class MissionExecutionService:
                 else []
             )
 
+            impact_runner = None
+            if target_connector is not None and mission_tenant:
+                from app.impact.runner import ConnectorImpactRunner
+
+                impact_runner = ConnectorImpactRunner(
+                    tenant_id=mission_tenant,
+                    attempt_number=int(getattr(record, "attempt_number", 1) or 1),
+                    heartbeat=lambda: store.touch_heartbeat(mission_id),
+                )
+
+            compat_notice = None
+            if mission.source_a.source_type == "FILE" and mission_tenant:
+                from app.services.source_control_cases import control_case_compatibility
+
+                compat = control_case_compatibility(mission_tenant, mission.source_a.source_id)
+                if compat["state"] == "REUPLOAD_REQUIRED":
+                    compat_notice = compat["message"]
+
             supervisor = AssuranceSupervisor(store)
             result = supervisor.run_mission(
                 mission, left_pkg, right_pkg,
                 target_connector=target_connector,
                 cancellation_check=_cancellation_requested,
                 control_cases=control_cases,
+                impact_runner=impact_runner,
+                source_compatibility_notice=compat_notice,
             )
 
             term_status = mission.status.value if hasattr(mission.status, "value") else str(mission.status)
@@ -269,6 +289,11 @@ class MissionExecutionService:
                 else "UNKNOWN"
             )
 
+            # Low-cardinality metric source: decision + connector flag only.
+            logger.info(
+                "MISSION_DECISION decision=%s connector=%s status=%s",
+                dec_val, target_connector is not None, term_status,
+            )
             if term_status == "CANCELLED":
                 return ProcessingResult(
                     outcome=ProcessingOutcome.CANCELLED, run_id=mission_id, job_id=job.job_id,

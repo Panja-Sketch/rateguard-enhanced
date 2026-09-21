@@ -16,6 +16,7 @@ from app.core.runtime_config import (
     resolve_ai_runtime_config,
     resolve_guardrails,
 )
+from app.impact.config import resolve_impact_config
 from app.ratelimit.policy import RateLimitConfigError, resolve_policies
 
 logger = logging.getLogger(__name__)
@@ -27,6 +28,7 @@ def validate_startup_configuration(
 ) -> dict[str, Any]:
     ai = resolve_ai_runtime_config(environ)
     guardrails = resolve_guardrails(environ)
+    impact = resolve_impact_config(environ)  # unsafe/invalid impact budgets abort startup
     problems: list[str] = []
 
     if not settings.firebase_project_id.strip():
@@ -68,6 +70,13 @@ def validate_startup_configuration(
         "auth": "firebase-adc",
         "cors_origin_count": len(origins),
         "guardrails": guardrails,
+        "impact_budgets": {
+            "max_policies": impact.max_policies,
+            "batch_size": impact.batch_size,
+            "global_request_concurrency": impact.global_request_concurrency,
+            "max_qps": impact.max_qps,
+            "max_mission_seconds": impact.max_mission_seconds,
+        },
         "rate_limits": {op: f"{p.limit}/{p.window_seconds}" for op, p in policies.items()},
     }
     logger.info("STARTUP_CONFIG_OK %s", summary)

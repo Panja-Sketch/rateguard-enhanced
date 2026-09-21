@@ -5,6 +5,7 @@ from pydantic import BaseModel, Field
 
 from app.engines.portfolio.consumer_protection import CohortDistributionResult, PipelineImpactResult
 from app.explanations.models import ExplanationDraft, ExplanationFacts
+from app.impact.aggregate import ImpactAggregate
 from app.models.mission import (
     AgentAction,
     BlastRadiusResult,
@@ -110,6 +111,11 @@ class AssuranceResultV2(BaseModel):
         default_factory=lambda: SectionResult(status=AnalysisStatus.NOT_RUN)
     )
     pipeline_impact: SectionResult[PipelineImpactResult] = Field(
+        default_factory=lambda: SectionResult(status=AnalysisStatus.NOT_RUN)
+    )
+    # Connector-backed portfolio impact (durable batched scan). NOT_RUN carries
+    # the reason; PARTIAL/COMPLETE/CANCELLED live in `data.status`.
+    connector_impact: SectionResult[ImpactAggregate] = Field(
         default_factory=lambda: SectionResult(status=AnalysisStatus.NOT_RUN)
     )
     explanation_facts: SectionResult[ExplanationFacts] = Field(

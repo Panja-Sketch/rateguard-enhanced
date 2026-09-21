@@ -198,6 +198,20 @@ class BaseRunStore(ABC):
         rows = [dict(v) for v in bucket.values() if tenant_id is None or v.get("tenant_id") == tenant_id]
         return rows[:MAX_SUBCOLLECTION_RECORDS]
 
+    def touch_heartbeat(self, run_id: str) -> None:
+        """Refreshes the execution lease heartbeat of a RUNNING mission so a
+        long-running stage (e.g. a connector impact scan) is not mistaken for a
+        crashed worker. Base implementation is a read-modify-write; the Firestore
+        adapter overrides it with a field-level update that cannot clobber a
+        concurrent cancellation or status write."""
+        record = self.get_run(run_id)
+        if record is None:
+            return
+        if not isinstance(record.metadata, dict):
+            record.metadata = {}
+        record.metadata["last_heartbeat_at"] = datetime.now(UTC).isoformat()
+        self.update_run(record)
+
     def acquire_lease(
         self, run_id: str, job_id: str, lease_seconds: int = LEASE_TTL_SECONDS
     ) -> tuple[LeaseOutcome, AssuranceRunRecord | None]:

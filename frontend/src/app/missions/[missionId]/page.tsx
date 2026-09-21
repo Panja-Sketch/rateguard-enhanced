@@ -8,6 +8,9 @@ import {
   getAssuranceRunEvents,
   getAssuranceRunEvidence,
   getConnectorEvidence,
+  getMissionImpact,
+  downloadEvidenceBundle,
+  type MissionImpact,
   cancelAssuranceMission,
   retryAssuranceMission,
   generateAlignmentOptions,
@@ -22,6 +25,8 @@ import { ImpactGraph } from '@/components/assurance/ImpactGraph';
 import { TestPlanViewer } from '@/components/assurance/TestPlanViewer';
 import { ReconciliationTrace } from '@/components/assurance/ReconciliationTrace';
 import { PortfolioImpactFunnel } from '@/components/assurance/PortfolioImpactFunnel';
+import { ConnectorImpactPanel } from '@/components/assurance/ConnectorImpactPanel';
+import { useAuth } from '@/lib/auth/AuthProvider';
 import { EvidenceLineage } from '@/components/assurance/EvidenceLineage';
 import { AgentActivityPanel } from '@/components/assurance/AgentActivityPanel';
 import {
@@ -97,9 +102,15 @@ export default function MissionDetailPage() {
   }, [missionId]);
 
   const [activeTab, setActiveTab] = useState<
-    'summary' | 'semantic' | 'impact' | 'experiments' | 'recon' | 'blast' | 'remediation' | 'evidence' | 'agent' | 'stages'
+    'summary' | 'semantic' | 'impact' | 'experiments' | 'recon' | 'blast' | 'connector' | 'remediation' | 'evidence' | 'agent' | 'stages'
   >('summary');
   const [connectorEvidence, setConnectorEvidence] = useState<ConnectorInvocationEvidence[]>([]);
+  const [connectorImpact, setConnectorImpact] = useState<MissionImpact | null>(null);
+  const [bundleBusy, setBundleBusy] = useState(false);
+  const [bundleMessage, setBundleMessage] = useState<string | null>(null);
+  const { session } = useAuth();
+  // Navigation hint only (the server re-authorizes): VIEWERs cannot export evidence.
+  const canExportEvidence = session?.role !== 'VIEWER';
 
   const pollTimerRef = useRef<NodeJS.Timeout | null>(null);
 
@@ -126,6 +137,11 @@ export default function MissionDetailPage() {
             setEvidence(evidenceRes.evidence || []);
           } catch {
             // Non-fatal: the Evidence Lineage tab falls back to its empty state.
+          }
+          try {
+            setConnectorImpact(await getMissionImpact(missionId));
+          } catch {
+            // Non-fatal: impact is only meaningful for connector-backed missions.
           }
           try {
             const connectorEvidenceRes = await getConnectorEvidence(missionId);
@@ -539,6 +555,7 @@ export default function MissionDetailPage() {
               { id: 'experiments', label: 'Boundary Experiments', icon: Sparkles },
               { id: 'recon', label: 'Reconciliation & RCA', icon: Sliders },
               { id: 'blast', label: 'Blast Radius & Telemetry', icon: BarChart3 },
+              ...(connectorImpact && connectorImpact.connector ? [{ id: 'connector', label: 'Connector Impact', icon: BarChart3 }] : []),
               { id: 'remediation', label: isEquivalence ? 'Alignment Options' : 'Remediation & Revalidation', icon: Check },
               { id: 'evidence', label: 'Evidence Lineage', icon: Database },
               { id: 'stages', label: 'Stage Ledger', icon: Layers },
@@ -666,6 +683,9 @@ export default function MissionDetailPage() {
               </div>
             )
           )}
+
+          {/* Connector-backed portfolio impact (durable batched scan) */}
+          {activeTab === 'connector' && <ConnectorImpactPanel impact={connectorImpact} />}
 
           {/* Tab 7: Remediation & Revalidation / Alignment Options */}
           {activeTab === 'remediation' && (
@@ -849,7 +869,33 @@ export default function MissionDetailPage() {
 
           {/* Tab 8: Evidence Lineage */}
           {activeTab === 'evidence' && (
-            <EvidenceLineage evidence={evidence} isCompleted={true} />
+            <div className="space-y-4">
+              {canExportEvidence && (
+                <div className="flex flex-wrap items-center gap-3">
+                  <button
+                    onClick={async () => {
+                      setBundleBusy(true);
+                      setBundleMessage(null);
+                      try {
+                        const r = await downloadEvidenceBundle(missionId);
+                        setBundleMessage(r.manifestSha256 ? `Manifest SHA-256: ${r.manifestSha256}` : 'Bundle downloaded.');
+                      } catch (e) {
+                        setBundleMessage(e instanceof ApiError ? e.message : 'Evidence bundle download failed.');
+                      } finally {
+                        setBundleBusy(false);
+                      }
+                    }}
+                    disabled={bundleBusy}
+                    data-testid="download-evidence-bundle"
+                    className="inline-flex items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-800 px-3.5 py-1.5 text-xs font-semibold text-slate-200 hover:bg-slate-700 disabled:opacity-50"
+                  >
+                    <Database className="h-3.5 w-3.5" /> {bundleBusy ? 'Preparing…' : 'Download evidence bundle (ZIP)'}
+                  </button>
+                  {bundleMessage && <span className="break-all font-mono text-[11px] text-slate-400">{bundleMessage}</span>}
+                </div>
+              )}
+              <EvidenceLineage evidence={evidence} isCompleted={true} />
+            </div>
           )}
 
           {/* Full 20-stage locked pipeline ledger (locked doc section 7.3):

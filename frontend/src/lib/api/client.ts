@@ -436,3 +436,120 @@ export async function fetchSession(): Promise<SessionInfo> {
   const res = await authFetch(`${BASE_URL}/api/v1/me`, { cache: 'no-store' });
   return handleResponse<SessionInfo>(res);
 }
+
+// ---------------------------------------------------------------------------
+// Connector-backed portfolio impact (Prompt 8)
+// ---------------------------------------------------------------------------
+
+export type ImpactStatus =
+  | 'NOT_RUN'
+  | 'QUEUED'
+  | 'RUNNING'
+  | 'COMPLETE'
+  | 'PARTIAL'
+  | 'CANCELLED'
+  | 'FAILED';
+
+export interface ImpactProgress {
+  batches_total: number;
+  batches_done: number;
+  batches_incomplete: number;
+  rows_processed: number;
+  rows_in_scope: number;
+  rows_total: number;
+  mismatches_so_far: number;
+  inconclusive_so_far: number;
+  retries: number;
+  elapsed_seconds: number;
+}
+
+export interface ImpactAggregate {
+  status: ImpactStatus;
+  impact_decision: 'BLOCK' | 'PASS_ELIGIBLE' | 'REVIEW_REQUIRED' | 'CANCELLED';
+  completeness: 'COMPLETE' | 'PARTIAL' | 'CANCELLED';
+  incomplete_reasons: string[];
+  exposure_is_lower_bound: boolean;
+  rows_total: number;
+  processed_policies: number;
+  eligible_policies: number;
+  out_of_scope_policies: number;
+  out_of_scope_reasons: Record<string, number>;
+  successful_comparisons: number;
+  mismatches: number;
+  inconclusive: number;
+  unprocessed_policies: number;
+  coverage_pct: number;
+  affected_pct: number;
+  overcharge_count: number;
+  overcharge_total: string;
+  undercharge_count: number;
+  undercharge_total: string;
+  signed_net_delta: string;
+  absolute_exposure: string;
+  mean_abs_delta: string | null;
+  median_abs_delta: string | null;
+  min_delta: string | null;
+  max_delta: string | null;
+  batch_count: number;
+  batches_done: number;
+  batches_incomplete: number;
+  retry_count: number;
+  request_count: number;
+  error_classes: Record<string, number>;
+  budget_exhausted: string[];
+  halt_reason: string | null;
+  cohort_distribution: {
+    minimum_cohort_size: number;
+    disclaimer: string;
+    cohorts: Array<{
+      cohort_dimension: string;
+      cohort_value: string;
+      sample_size: number;
+      suppressed: boolean;
+      affected_rate: number | null;
+      mean_absolute_change: string | null;
+      overcharge_rate: number | null;
+    }>;
+  } | null;
+  pipeline_impact: {
+    as_of_date: string;
+    buckets: Array<{ window_label: string; affected_renewal_count: number; total_absolute_impact: string }>;
+    total_affected_renewals_next_90_days: number;
+  } | null;
+  provenance: Record<string, unknown>;
+  result_sha256: string;
+}
+
+export interface MissionImpact {
+  mission_id: string;
+  status: ImpactStatus;
+  reason?: string;
+  job_id?: string;
+  progress?: ImpactProgress;
+  connector?: { connector_id: string; engine_version: string; batch_quote: boolean };
+  aggregate?: ImpactAggregate | null;
+}
+
+export async function getMissionImpact(missionId: string): Promise<MissionImpact> {
+  const res = await authFetch(`${BASE_URL}/api/v1/missions/${missionId}/impact`, { cache: 'no-store' });
+  return handleResponse<MissionImpact>(res);
+}
+
+/** Downloads the tenant-scoped evidence bundle (ZIP) through the authenticated
+ * fetch (the token is never placed in a URL) and hands it to the browser. */
+export async function downloadEvidenceBundle(missionId: string): Promise<{ manifestSha256: string | null }> {
+  const res = await authFetch(`${BASE_URL}/api/v1/missions/${missionId}/evidence/bundle`, { cache: 'no-store' });
+  if (!res.ok) {
+    await handleResponse<unknown>(res); // throws a typed ApiError
+  }
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `${missionId}-evidence.zip`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+  return { manifestSha256: res.headers.get('X-Manifest-SHA256') };
+}

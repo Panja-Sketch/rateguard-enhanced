@@ -168,7 +168,7 @@ class PricingSourceIngestionService:
         self.artifact_store.save_artifact(ipir_art, ipir_json)
 
         verified_cases = result.evidence.get("verified_control_cases")
-        if verified_cases:
+        if verified_cases is not None:  # always written for workbooks (even []), so absence means "legacy"
             save_verified_control_cases(tenant_id, source_descriptor.source_id, verified_cases, self.artifact_store)
 
         return result

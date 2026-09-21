@@ -396,6 +396,11 @@ def get_assurance_mission(mission_id: str, user: AuthenticatedUser = Depends(req
 
     res_dict = record.report if isinstance(record.report, dict) else {}
     meta = record.metadata if isinstance(record.metadata, dict) else {}
+    from app.services.evidence_bundle import normalize_reason_codes
+
+    # Compatibility: evidence stored before the doubled-prefix fix
+    # (CONNECTOR_CONNECTOR_FAILURE) is normalised on read, never rewritten.
+    res_dict = normalize_reason_codes(res_dict)
     return {
         "mission_id": record.run_id,
         "status": record.status.value if hasattr(record.status, "value") else str(record.status),
@@ -478,6 +483,85 @@ def get_mission_gemini_evidence(mission_id: str, user: AuthenticatedUser = Depen
     }
 
 
+@router.get("/missions/{mission_id}/evidence/bundle")
+def download_mission_evidence_zip(
+    mission_id: str,
+    user: AuthenticatedUser = Depends(require_evidence_download),
+    _quota: None = Depends(rate_limited("evidence_download")),
+) -> Response:
+    """Deterministic `evidence-bundle-v1` ZIP: manifest with per-file SHA-256,
+    allowlisted sections, human-readable summary. Tenant-scoped; fails closed
+    if any section would carry a secret- or PII-shaped value."""
+    from app.connectors.registry import get_registry
+    from app.impact.store import get_impact_store
+    from app.services.evidence_bundle import EvidenceBundleError, build_bundle, build_sections
+    from app.storage import EvidenceType
+
+    store = get_run_store()
+    record = get_scoped_run(store, mission_id, user)
+    tenant_id = record.tenant_id or user.tenant_id
+    report = record.report if isinstance(record.report, dict) else {}
+    evidence = store.get_evidence(mission_id)
+
+    def _summ(ev_type: Any, fields: tuple[str, ...]) -> list[dict[str, Any]]:
+        out = []
+        for ev in evidence:
+            if ev.evidence_type == ev_type:
+                raw = ev.data_summary if isinstance(ev.data_summary, dict) else {}
+                out.append({**{f: raw.get(f) for f in fields}, "evidence_id": ev.evidence_id})
+        return out
+
+    meta = record.metadata if isinstance(record.metadata, dict) else {}
+    mission_obj = meta.get("mission_object") if isinstance(meta.get("mission_object"), dict) else {}
+    src_b = (mission_obj or {}).get("source_b") or {}
+    connector_meta = None
+    entry = get_registry().get(src_b.get("connector_id") or "")
+    if entry is not None:
+        connector_meta = {
+            "connector_id": entry.connector_id, "display_name": entry.display_name,
+            "allowed_engine_versions": list(entry.allowed_engine_versions),
+            "engine_version": src_b.get("engine_version"), "auth_mode": entry.auth_mode,
+        }
+    jobs = get_impact_store().find_jobs_for_mission(tenant_id, mission_id)
+    try:
+        sections = build_sections(
+            record=record, tenant_id=tenant_id, report=report,
+            gemini_evidence=_summ(EvidenceType.GEMINI_INVOCATION, _SAFE_GEMINI_EVIDENCE_FIELDS),
+            connector_evidence=_summ(EvidenceType.CONNECTOR_INVOCATION, _SAFE_CONNECTOR_EVIDENCE_FIELDS),
+            explanations=store.list_explanations(mission_id, tenant_id),
+            connector_meta=connector_meta,
+            impact_job={"aggregate": jobs[0].aggregate} if jobs else None,
+        )
+        zip_bytes, manifest, manifest_sha = build_bundle(sections, mission_id=mission_id, tenant_id=tenant_id)
+    except EvidenceBundleError:
+        logger.error("EVIDENCE_BUNDLE_FAILED mission=%s reason=unsafe_content", mission_id)
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                            detail="Evidence bundle could not be produced safely.") from None
+    bundle_sha = hashlib.sha256(zip_bytes).hexdigest()
+    try:
+        get_artifact_store().save_artifact(
+            ArtifactDescriptor(
+                artifact_id=f"EVZ-{manifest_sha[:32]}", tenant_id=tenant_id, scope="missions", scope_id=mission_id,
+                kind="evidence", category=ArtifactCategory.ASSURANCE_REPORT, filename=f"{mission_id}-evidence.zip",
+                content_type="application/zip", size_bytes=len(zip_bytes), storage_uri="",
+            ),
+            zip_bytes,
+        )
+    except ArtifactPathError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Assurance mission '{mission_id}' not found.") from None
+    return Response(
+        content=zip_bytes,
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": f'attachment; filename="{mission_id}-evidence.zip"',
+            "X-Bundle-SHA256": bundle_sha,
+            "X-Manifest-SHA256": manifest_sha,
+            "X-Content-Type-Options": "nosniff",
+            "Cache-Control": "no-store",
+        },
+    )
+
+
 @router.get("/missions/{mission_id}/evidence/download")
 def download_mission_evidence_bundle(
     mission_id: str,
@@ -534,6 +618,41 @@ def download_mission_evidence_bundle(
             "Cache-Control": "no-store",
         },
     )
+
+
+@router.get("/missions/{mission_id}/impact")
+def get_mission_impact(mission_id: str, user: AuthenticatedUser = Depends(require_read)) -> dict[str, Any]:
+    """Live/final connector-backed portfolio impact for one mission (tenant-scoped).
+    Returns aggregate counters only - never rows, inputs or policy identifiers."""
+    from app.impact.store import get_impact_store
+
+    store = get_run_store()
+    record = get_scoped_run(store, mission_id, user)
+    tenant_id = record.tenant_id or user.tenant_id
+    jobs = get_impact_store().find_jobs_for_mission(tenant_id, mission_id)
+    report = record.report if isinstance(record.report, dict) else {}
+    if not jobs:
+        section = report.get("connector_impact") or {}
+        status_value = record.status.value if hasattr(record.status, "value") else str(record.status)
+        if status_value in ("COMPLETED", "FAILED", "CANCELLED", "NEEDS_REVIEW", "ARCHIVED"):
+            reason = section.get("reason") or "Connector-backed portfolio impact did not run for this mission."
+            return {"mission_id": mission_id, "status": "NOT_RUN", "reason": reason}
+        return {"mission_id": mission_id, "status": "QUEUED", "reason": "The mission has not reached portfolio impact yet."}
+    job = jobs[0]
+    body: dict[str, Any] = {
+        "mission_id": mission_id,
+        "job_id": job.job_id,
+        "attempt_number": job.attempt_number,
+        "status": job.status.value,
+        "progress": job.progress,
+        "cancel_requested": job.cancel_requested,
+        "connector": {"connector_id": job.connector.get("connector_id"),
+                      "engine_version": job.connector.get("engine_version"),
+                      "batch_quote": bool(job.connector.get("batch_max_items"))},
+        "snapshot": job.snapshot,
+        "aggregate": job.aggregate,
+    }
+    return body
 
 
 _SAFE_CONNECTOR_EVIDENCE_FIELDS = (

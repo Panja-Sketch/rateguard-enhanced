@@ -58,6 +58,8 @@ Response shapes (no token contents, claim values, library text or stack trace):
 | `GET /missions/{id}` | ✔ | ✔ | ✔ | ✔ | ✔ | |
 | `GET /missions/{id}/evidence` | ✔ | ✔ | ✔ | ✔ | ✔ | Sanitized Gemini-invocation summary |
 | `GET /missions/{id}/connector-evidence` | ✔ | ✔ | ✔ | ✔ | ✔ | Hashes/status only |
+| `GET /missions/{id}/impact` | ✔ | ✔ | ✔ | ✔ | ✔ | Connector-backed portfolio impact (live progress / final aggregate; counters only) |
+| `GET /missions/{id}/evidence/bundle` | ✔ | ✔ | ✔ | | ✔ | **Evidence bundle** (`evidence-bundle-v1` ZIP, per-file SHA-256 manifest); VIEWER excluded like the JSON download |
 | `GET /missions/{id}/evidence/download` | ✔ | ✔ | ✔ | | ✔ | **Evidence download** (JSON bundle + SHA-256); VIEWER may read summaries but not export |
 | `GET /assurance/runs/{id}/events`, `.../evidence` | ✔ | ✔ | ✔ | ✔ | ✔ | Used by the mission page timeline / lineage tabs |
 | `POST /missions/{id}/alignment-options` | ✔ | ✔ | | | ✔ | |
@@ -135,7 +137,7 @@ Fixed-window counters per **tenant + authenticated uid + operation**, kept in Fi
 | `source_upload` | `POST /sources` | 30 / hour |
 | `source_compile` | `POST /sources/{id}/compile` | 30 / hour |
 | `explanation_create` | `POST /missions/{id}/explanations` | 20 / hour |
-| `evidence_download` | `GET /missions/{id}/evidence/download` | 30 / hour |
+| `evidence_download` | `GET /missions/{id}/evidence/download` and `.../evidence/bundle` | 30 / hour |
 | `source_download` | `GET /sources/{id}/artifacts/{artifact_id}` | 60 / hour |
 
 * Configure with `RATEGUARD_RATE_LIMITS='{"mission_create":"10/3600"}'` (`limit/window_seconds`, limit 1-10000, window 1-86400 s; unknown operations rejected at startup). `RATEGUARD_RATE_LIMIT_ENABLED=false` is rejected at startup in `candidate`/`staging`/`production`.

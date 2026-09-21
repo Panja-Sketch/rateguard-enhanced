@@ -195,6 +195,7 @@ def get_pricing_source(source_id: str, user: AuthenticatedUser = Depends(require
         "sha256": (desc.metadata or {}).get("sha256"),
         "tenant_id": (desc.metadata or {}).get("tenant_id"),
         "artifact_ids": [desc.source_id, f"IPIR-{desc.source_id}"],
+        "compatibility": _source_compatibility(desc, user),
     }
 
 
@@ -228,3 +229,14 @@ def download_source_artifact(
             "Cache-Control": "no-store",
         },
     )
+
+
+def _source_compatibility(desc, user) -> dict[str, Any]:
+    """`REUPLOAD_REQUIRED` for a workbook compiled before the control-case
+    artifact existed; `NOT_APPLICABLE`/`OK` otherwise. Never fabricates cases."""
+    from app.services.source_control_cases import control_case_compatibility
+
+    try:
+        return control_case_compatibility(user.tenant_id, desc.source_id)
+    except Exception:  # noqa: BLE001 - metadata read must never fail because of compatibility probing
+        return {"state": "UNKNOWN", "artifact_version": None, "message": None}

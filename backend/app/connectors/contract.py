@@ -132,3 +132,85 @@ class ConnectorQuoteResponse(BaseModel):
     trace: list[ConnectorTraceStep] = Field(default_factory=list)
     rated_at: datetime
     jurisdiction: str | None = None
+
+
+# -- optional batch-quote capability (`quote-batch-v1`) -----------------------
+#
+# A connector MAY advertise `GET /capabilities` ->
+# {"quote_batch": {"schema_version": "quote-batch-v1", "max_items": N}}.
+# RateGuard then sends up to N independent items per request; a connector that
+# does not advertise it is driven with the single-quote contract above. Items
+# are correlated by `item_id` (an opaque per-job row reference), never by
+# position.
+
+BATCH_SCHEMA_VERSION = "quote-batch-v1"
+BATCH_MAX_ITEMS = 250
+MAX_BATCH_REQUEST_BYTES = 512 * 1024
+
+
+class ConnectorBatchItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    item_id: str
+    effective_date: date
+    transaction_type: TransactionType
+    inputs: dict[str, Any]
+
+
+class ConnectorBatchRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: str = BATCH_SCHEMA_VERSION
+    batch_id: str
+    engine_version: str
+    product_id: str
+    items: list[ConnectorBatchItem] = Field(min_length=1, max_length=BATCH_MAX_ITEMS)
+
+    @field_validator("schema_version")
+    @classmethod
+    def _version_supported(cls, value: str) -> str:
+        if value != BATCH_SCHEMA_VERSION:
+            raise ValueError(f"unsupported batch schema_version '{value}'")
+        return value
+
+    @field_validator("items")
+    @classmethod
+    def _unique_item_ids(cls, items: list[ConnectorBatchItem]) -> list[ConnectorBatchItem]:
+        if len({i.item_id for i in items}) != len(items):
+            raise ValueError("item_id values must be unique within a batch")
+        return items
+
+
+class ConnectorBatchItemError(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    code: str
+    message: str = ""
+
+
+class ConnectorBatchItemResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    item_id: str
+    status: str  # "OK" | "ERROR"
+    outputs: dict[str, str] = Field(default_factory=dict)
+    error: ConnectorBatchItemError | None = None
+
+    @field_validator("status")
+    @classmethod
+    def _status_known(cls, value: str) -> str:
+        if value not in ("OK", "ERROR"):
+            raise ValueError(f"unsupported item status '{value}'")
+        return value
+
+
+class ConnectorBatchResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: str = BATCH_SCHEMA_VERSION
+    batch_id: str
+    engine_version: str
+    results: list[ConnectorBatchItemResult]
+    rated_at: datetime
+    # Rating-engine build/revision identifier when the target reports one.
+    engine_revision: str | None = None

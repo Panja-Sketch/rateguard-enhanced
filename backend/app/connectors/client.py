@@ -35,7 +35,15 @@ import httpx
 from pydantic import ValidationError
 
 from app.connectors.budget import TargetBudget
-from app.connectors.contract import ConnectorQuoteRequest, ConnectorQuoteResponse
+from app.connectors.contract import (
+    BATCH_MAX_ITEMS,
+    BATCH_SCHEMA_VERSION,
+    MAX_BATCH_REQUEST_BYTES,
+    ConnectorBatchRequest,
+    ConnectorBatchResponse,
+    ConnectorQuoteRequest,
+    ConnectorQuoteResponse,
+)
 from app.connectors.errors import ConnectorException, ConnectorFailureCategory
 from app.connectors.redact import scrub_secrets
 from app.connectors.registry import ConnectorRegistryEntry, select_connector
@@ -72,6 +80,23 @@ REQUEST_TIMEOUT_SECONDS = 10.0
 MAX_RESPONSE_BYTES = 1 * 1024 * 1024
 
 
+def _parse_capabilities(body: bytes) -> dict[str, Any] | None:
+    """Extracts the `quote_batch` capability, or None if absent/invalid."""
+    try:
+        raw = json.loads(body)
+        batch = raw.get("quote_batch") if isinstance(raw, dict) else None
+        if (
+            isinstance(batch, dict)
+            and batch.get("schema_version") == BATCH_SCHEMA_VERSION
+            and isinstance(batch.get("max_items"), int)
+            and batch["max_items"] > 0
+        ):
+            return {"max_items": batch["max_items"]}
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        pass
+    return None
+
+
 class ConnectorClient:
     """Stateless-per-call HTTP client. `transport` and `sleep_fn` are
     injectable for tests (an `httpx.ASGITransport` wrapping a real FastAPI
@@ -84,10 +109,16 @@ class ConnectorClient:
         transport: httpx.AsyncBaseTransport | None = None,
         sleep_fn: Callable[[float], Awaitable[None]] = asyncio.sleep,
         max_attempts: int = MAX_ATTEMPTS,
+        request_timeout_seconds: float = REQUEST_TIMEOUT_SECONDS,
+        on_retry: Callable[[str], None] | None = None,
     ) -> None:
         self._transport = transport
         self._sleep_fn = sleep_fn
         self._max_attempts = max_attempts
+        self._request_timeout = request_timeout_seconds
+        # Called with the failure code each time a transient failure is retried;
+        # lets a caller count retries without the client keeping global state.
+        self._on_retry = on_retry
 
     async def send_quote(
         self,
@@ -121,6 +152,25 @@ class ConnectorClient:
         a mission/user-supplied URL — `entry` always originates from the
         fixed registry or a test fixture, never request input."""
         correlation_id = correlation_id or str(uuid.uuid4())
+        target_payload = self._to_target_payload(request, correlation_id)
+        return await self._execute(
+            entry, "POST", "/quote", target_payload, correlation_id, budget,
+            lambda body: self._parse_response(body, request, correlation_id),
+        )
+
+    async def _execute(
+        self,
+        entry: ConnectorRegistryEntry,
+        method: str,
+        path: str,
+        payload: dict[str, Any] | None,
+        correlation_id: str,
+        budget: TargetBudget | None,
+        parse: Callable[[bytes], Any],
+    ) -> Any:
+        """Shared, security-checked request loop: allowlisted destination, TLS
+        and SSRF validation, no redirects, capped response size, retry of only
+        transient failures with capped jittered exponential backoff."""
         budget = budget or TargetBudget()
 
         scheme = entry.scheme()
@@ -128,15 +178,15 @@ class ConnectorClient:
         enforce_https_or_local_dev(scheme, host, is_local_dev=entry.is_local_dev)
         resolve_and_validate_host(host, port, allow_local_dev_loopback=entry.is_local_dev)
 
-        target_payload = self._to_target_payload(request, correlation_id)
-
         last_error: ConnectorException | None = None
         for attempt in range(1, self._max_attempts + 1):
             budget.check()
             try:
-                status_code, body = await self._do_request(entry, target_payload, correlation_id)
+                status_code, body = await self._do_request(
+                    entry, payload, correlation_id, path=path, method=method
+                )
                 self._raise_for_status(status_code, correlation_id)
-                return self._parse_response(body, request, correlation_id)
+                return parse(body)
             except ConnectorException as exc:
                 last_error = exc
                 is_last_attempt = attempt == self._max_attempts
@@ -161,10 +211,84 @@ class ConnectorClient:
                     delay,
                     exc.error.code,
                 )
+                if self._on_retry is not None:
+                    self._on_retry(exc.error.code)
                 await self._sleep_fn(delay)
 
         assert last_error is not None  # pragma: no cover - loop always sets/raises
         raise last_error
+
+    # -- optional batch-quote capability ------------------------------------------
+
+    async def discover_batch_capability(
+        self, entry: ConnectorRegistryEntry, *, correlation_id: str | None = None
+    ) -> int:
+        """Returns the connector's advertised `quote-batch-v1` item limit, or 0
+        when it does not (or cannot verifiably) advertise the capability. Any
+        failure means "single-quote only" - the mission never depends on it."""
+        correlation_id = correlation_id or str(uuid.uuid4())
+        try:
+            caps = await self._execute(
+                entry, "GET", "/capabilities", None, correlation_id, None, _parse_capabilities
+            )
+        except ConnectorException:
+            return 0
+        return min(caps.get("max_items", 0), BATCH_MAX_ITEMS) if caps else 0
+
+    async def send_quote_batch(
+        self,
+        entry: ConnectorRegistryEntry,
+        request: ConnectorBatchRequest,
+        *,
+        budget: TargetBudget | None = None,
+        correlation_id: str | None = None,
+    ) -> ConnectorBatchResponse:
+        """Sends one bounded `quote-batch-v1` request. Independent per-item
+        results/errors; the same TLS, SSRF, no-redirect and ID-token controls as
+        a single quote."""
+        correlation_id = correlation_id or str(uuid.uuid4())
+        payload = request.model_dump(mode="json")
+        if len(json.dumps(payload, separators=(",", ":")).encode()) > MAX_BATCH_REQUEST_BYTES:
+            raise ConnectorException(
+                code="CONNECTOR_BATCH_REQUEST_TOO_LARGE",
+                message=f"Batch request exceeded the {MAX_BATCH_REQUEST_BYTES}-byte limit.",
+                category=ConnectorFailureCategory.NON_RETRYABLE,
+                correlation_id=correlation_id,
+            )
+        return await self._execute(
+            entry, "POST", "/quote/batch", payload, correlation_id, budget,
+            lambda body: self._parse_batch_response(body, request, correlation_id),
+        )
+
+    def _parse_batch_response(
+        self, body: bytes, request: ConnectorBatchRequest, correlation_id: str
+    ) -> ConnectorBatchResponse:
+        try:
+            response = ConnectorBatchResponse.model_validate(json.loads(body))
+        except (json.JSONDecodeError, UnicodeDecodeError, ValidationError) as exc:
+            raise ConnectorException(
+                code="CONNECTOR_SCHEMA_VIOLATION",
+                message=scrub_secrets(f"Batch response failed strict validation: {type(exc).__name__}"),
+                category=ConnectorFailureCategory.NON_RETRYABLE,
+                correlation_id=correlation_id,
+            ) from exc
+        if response.batch_id != request.batch_id or response.engine_version != request.engine_version:
+            raise ConnectorException(
+                code="CONNECTOR_REQUEST_ID_MISMATCH",
+                message="Batch response batch_id/engine_version did not match the request.",
+                category=ConnectorFailureCategory.NON_RETRYABLE,
+                correlation_id=correlation_id,
+            )
+        sent = [i.item_id for i in request.items]
+        got = [r.item_id for r in response.results]
+        if sorted(sent) != sorted(got):
+            raise ConnectorException(
+                code="CONNECTOR_BATCH_ITEM_MISMATCH",
+                message="Batch response items did not correspond one-to-one with the request items.",
+                category=ConnectorFailureCategory.NON_RETRYABLE,
+                correlation_id=correlation_id,
+            )
+        return response
 
     # -- payload translation -------------------------------------------------
 
@@ -197,8 +321,11 @@ class ConnectorClient:
     async def _do_request(
         self,
         entry: ConnectorRegistryEntry,
-        payload: dict[str, Any],
+        payload: dict[str, Any] | None,
         correlation_id: str,
+        *,
+        path: str = "/quote",
+        method: str = "POST",
     ) -> tuple[int, bytes]:
         headers = {"X-Correlation-Id": correlation_id}
         if entry.auth_header_name and entry.auth_token_env_var:
@@ -236,9 +363,9 @@ class ConnectorClient:
 
         timeout = httpx.Timeout(
             connect=CONNECT_TIMEOUT_SECONDS,
-            read=REQUEST_TIMEOUT_SECONDS,
-            write=REQUEST_TIMEOUT_SECONDS,
-            pool=REQUEST_TIMEOUT_SECONDS,
+            read=self._request_timeout,
+            write=self._request_timeout,
+            pool=self._request_timeout,
         )
         client_kwargs: dict[str, Any] = {
             "base_url": entry.base_url,
@@ -250,7 +377,10 @@ class ConnectorClient:
 
         try:
             async with httpx.AsyncClient(**client_kwargs) as client:
-                async with client.stream("POST", "/quote", json=payload, headers=headers) as response:
+                request_kwargs: dict[str, Any] = {"headers": headers}
+                if payload is not None:
+                    request_kwargs["json"] = payload
+                async with client.stream(method, path, **request_kwargs) as response:
                     if 300 <= response.status_code < 400:
                         raise ConnectorException(
                             code="CONNECTOR_UNEXPECTED_REDIRECT",

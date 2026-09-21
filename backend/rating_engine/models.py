@@ -53,3 +53,57 @@ class QuoteError(BaseModel):
     code: str
     message: str
     correlation_id: str
+
+
+# -- optional batch-quote capability (`quote-batch-v1`) ------------------------
+# Advertised through `GET /capabilities`; the single-quote `/quote` contract
+# above is unchanged and remains the baseline every connector must support.
+
+BATCH_SCHEMA_VERSION = "quote-batch-v1"
+BATCH_MAX_ITEMS = 250
+
+
+class BatchQuoteItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    item_id: str
+    effective_date: date
+    transaction_type: TransactionType
+    inputs: dict[str, Any]
+
+
+class BatchQuoteRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: str = BATCH_SCHEMA_VERSION
+    batch_id: str
+    engine_version: str
+    product_id: str
+    items: list[BatchQuoteItem] = Field(min_length=1, max_length=BATCH_MAX_ITEMS)
+
+
+class BatchItemError(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    code: str
+    message: str = ""
+
+
+class BatchQuoteItemResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    item_id: str
+    status: str
+    outputs: dict[str, str] = Field(default_factory=dict)
+    error: BatchItemError | None = None
+
+
+class BatchQuoteResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: str = BATCH_SCHEMA_VERSION
+    batch_id: str
+    engine_version: str
+    results: list[BatchQuoteItemResult]
+    rated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    engine_revision: str | None = None

@@ -15,7 +15,7 @@ implements every step; commands below are what it runs.
 3. **Build** — `deploy_release.sh build`: three Cloud Builds (`backend/cloudbuild.yaml` → api+worker image,
    `backend/rating_engine/cloudbuild.yaml`, `frontend/cloudbuild.yaml`), each tagged with the **full git SHA**
    (never `latest`); digests recorded in `infrastructure/.release-digests.env`.
-4. **Stage** — `deploy_release.sh stage`: deploys **by digest** with `--no-traffic --tag p8`, records the
+4. **Stage** — `deploy_release.sh stage`: deploys **by digest** with `--no-traffic --tag p8rc`, records the
    previous revision names in `.previous-revisions.env`, sets `RATEGUARD_GIT_SHA` / `RATEGUARD_IMAGE_DIGEST`
    (surfaced in evidence bundles). Health-check each tagged URL; confirm private services reject
    unauthenticated calls (403) and that the tagged rating engine answers `GET /capabilities` with an ID token.

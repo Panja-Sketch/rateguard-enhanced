@@ -1,8 +1,55 @@
 # RateGuard Enhanced — Implementation Status
 
-**Last updated:** 2026-09-17 (end of session 1 — shared foundations complete and verified)
+**Last updated:** 2026-09-21 (Prompt 8 — connector-backed portfolio impact, hardening and operational assurance deployed and verified; session-1 history below)
 
 This file reports only what has been verified by running code/tests, not intent. Update it in the same change that changes the state it describes.
+
+
+## Prompt 8 — connector impact, security hardening, operational assurance (2026-09-21)
+
+Release commit `78f1857ce0f86abd170bb29ff4f779b2b58bca86` (branch `feat/prompt8-connector-impact-hardening`), deployed by digest:
+
+| Service | Revision (100 %) | Digest | Previous (rollback) |
+|---|---|---|---|
+| rateguard-worker | `00004-wam` | `sha256:876617977f66fa5341b7139da8258877cd0246dc1db4bc13002789ac2cd670ee` | `00003-96v` |
+| rateguard-api | `00005-xok` | same backend image | `00004-hwh` |
+| rateguard-rating-engine | `00006-tjn` (same image as tagged `00004-fik`; only the demo fault variable was toggled) | `sha256:a4cf34fae98ba2955349b3afa95a9c2588d012a93573a9d564e1b1739a07f4f6` | `00003-bn5` |
+| rateguard-web | `00004-zux` | `sha256:e320be78084ca929c58112bdd6234db7592fdcf5a0ae2ef99282c8c78b6523f5` | `00003-tbr` |
+
+Live acceptance (temporary Firebase users, now disabled; synthetic data):
+
+| Mission | Scenario | Result |
+|---|---|---|
+| `MIS-8DB4C882` | clean workbook vs `canonical-v1` | `PASS`; impact `COMPLETE`; 37,533 eligible compared, 0 mismatches, 12,467 out of scope (Sept. effective dates), 250 batches, 231 s |
+| `MIS-BC3FDB58` | vs `defective-v1` | `BLOCK_DEPLOYMENT`; 13,446 affected, undercharge $605,070.00 (all −$45.00), 30/60/90-day renewals 953/1,277/1,365, 23 cohorts, 250 s; **identical to package-vs-package on the same 37,533 in-period policies** (13,446 / $605,070.00) |
+| `MIS-71C2B921` | `canonical-v1` + 15 % injected transient faults | `REVIEW_REQUIRED`; impact `PARTIAL`, coverage 66.88 %, 4,726 inconclusive, budget exhausted; no double counting (`compared + inconclusive + out-of-scope + unprocessed = 50,000`) |
+| `MIS-102F8076` | `defective-v1` + faults | `BLOCK_DEPLOYMENT`; `PARTIAL`; exposure **lower bound** $404,640.00 (62.09 % coverage) |
+| `MIS-1DE6C142` | canonical, fault removed mid-scan | coverage rose to 96.92 % — batches resumed unresolved rows only; 49 batches had exhausted their 3 attempts → honest `PARTIAL`/`REVIEW_REQUIRED` |
+| `MIS-210F8560` | DR drill: worker traffic rolled back to the previous revision mid-scan, then restored | stayed `BLOCK_DEPLOYMENT`; Pub/Sub 404-backoff delayed redelivery so the scan ended `PARTIAL` (228/250 batches, lower-bound exposure); results not corrupted or double counted |
+| `MIS-4C39BD71` | final clean after all drills | `PASS`, `COMPLETE` |
+
+Also verified live: Firebase login/ID-token verification on ADC (no key), RBAC (viewer 403 on export/create), cross-tenant 404 on mission/impact/bundle, unauthenticated 401, CORS allow/deny, private worker & rating engine (403 unauthenticated; API → engine via ID token), authenticated Pub/Sub push (200) incl. duplicate batch delivery for a finished job (acked, result unchanged), rate limiting (5×200 then 429), Vertex AI via worker identity (`gemini-3.1-flash-lite`, `EXPLANATION_DRAFT` succeeded after IAM cleanup), evidence bundles (hashes verified, no secret/PII strings), sampled 3,000 log lines (0 policy ids/tokens/emails), log-based metrics populated, 7 alert policies + dashboard + $25 budget exist.
+
+Tests (final worktree): ruff clean; backend pytest ≈1,158 passed with the Firestore emulator required (`RATEGUARD_REQUIRE_EMULATOR=1`), no skips (one rate-limiter emulator test timed out once when three pytest processes shared one emulator and passed on rerun, 102/102 for `tests/ratelimit`+`tests/storage`); Firestore rules 130/130 (incl. `impact_jobs`); frontend typecheck, lint, Jest 64/64, production build, Playwright 10/10; secret scan clean.
+
+IAM: see `docs/security/IAM_INVENTORY.md`. Firebase Admin key `1bb0ac90…` deleted, `FIREBASE_ADMIN_KEY` v1–2 and `GEMINI_API_KEY` v1 disabled.
+
+### Remaining limitations
+
+| Limitation | Class |
+|---|---|
+| Notification email channel `RateGuard operator email` is unverified until the recipient clicks Google's link | production-hardening (one manual step) |
+| Default Compute SA still has `roles/editor` (Google default; Cloud Build may rely on it) | production-hardening |
+| Budget alerts do not cap spend | production-hardening (by design) |
+| A full 50k scan takes ~4 min on a 1-vCPU worker (CPU-bound local oracle) against the 540 s budget; scale worker CPU/instances before larger portfolios | production-hardening |
+| Rolling the worker back mid-scan degrades that scan to `PARTIAL` (Pub/Sub 404 backoff up to 10 min); retry the mission | production-hardening |
+| For a `PARTIAL` scan, `eligible`/out-of-scope only count processed rows | optional enhancement |
+| Sources page does not render `compatibility.state` (REUPLOAD_REQUIRED is enforced server-side and shown in the mission decision) | optional enhancement |
+| Live Gemini fallback and Firestore-outage rate-limit alerts were not induced | optional enhancement |
+| Single-quote-only connectors need ≈ rows/QPS seconds and may end `PARTIAL` | documented behaviour |
+| Synthetic portfolio; 12,467 policies (Sept. dates) fall outside the workbook's effective period and are disclosed, not priced | documented behaviour |
+
+No release blockers.
 
 ## Session 1 — Shared foundations (IPIR v0.2 + rating-engine foundation)
 

@@ -2,7 +2,7 @@
 # RateGuard Enhanced - release deployment by immutable digest (project rateguard-enhanced).
 #
 #   infrastructure/deploy_release.sh build          # build 4 images tagged with the FULL git SHA, record digests
-#   infrastructure/deploy_release.sh stage          # deploy no-traffic revisions tagged `p8`, run health checks
+#   infrastructure/deploy_release.sh stage          # deploy no-traffic revisions tagged `p8rc`, run health checks
 #   infrastructure/deploy_release.sh shift 25|50|100 # move production traffic to the tagged revisions
 #   infrastructure/deploy_release.sh rollback       # send 100% traffic back to the previous revisions
 #
@@ -13,7 +13,7 @@ set -euo pipefail
 PROJECT="rateguard-enhanced"
 REGION="us-central1"
 REPO="${REGION}-docker.pkg.dev/${PROJECT}/rateguard-images"
-TAG_NAME="p8"
+TAG_NAME="p8rc"
 SHA="$(git rev-parse HEAD)"
 DIGESTS="infrastructure/.release-digests.env"
 API_URL="${RG_API_URL:-https://rateguard-api-nwhotixfva-uc.a.run.app}"
@@ -36,7 +36,7 @@ cmd_build() {
   require_clean
   gcloud builds submit . --project "$PROJECT" --config backend/cloudbuild.yaml --substitutions "_IMAGE_TAG=${SHA}"
   gcloud builds submit . --project "$PROJECT" --config backend/rating_engine/cloudbuild.yaml --substitutions "_IMAGE_TAG=${SHA}"
-  gcloud builds submit . --project "$PROJECT" --config frontend/cloudbuild.yaml \
+  gcloud builds submit ./frontend --project "$PROJECT" --config frontend/cloudbuild.yaml \
     --substitutions "_IMAGE_TAG=${SHA},_NEXT_PUBLIC_RATEGUARD_API_URL=${API_URL}$(web_env)"
   {
     echo "GIT_SHA=${SHA}"

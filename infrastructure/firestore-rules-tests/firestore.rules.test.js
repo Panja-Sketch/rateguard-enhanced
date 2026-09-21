@@ -34,6 +34,8 @@ const DOC_PATHS = [
   'assurance_runs/MIS-1/evidence/EV-1',
   'assurance_runs/MIS-1/explanations/EXP-1',
   'rate_limits/abc123',
+  'impact_jobs/rateguard-demo--IJ-1',
+  'impact_jobs/rateguard-demo--IJ-1/batches/00000',
   'idempotency/rateguard-demo:key1',
   'sources/SRC-1',
   'connectors/rating-engine-demo',

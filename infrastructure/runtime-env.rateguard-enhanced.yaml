@@ -53,3 +53,20 @@ RATEGUARD_ENVIRONMENT: "production"
 # RATEGUARD_SERVICE_ROLE is set per service by the deploy script (api | worker).
 # RATEGUARD_LEGACY_RECORD_TENANT_ID is intentionally NOT set: pre-tenant records
 # stay hidden from every user until an operator opts in.
+
+# Connector-backed portfolio impact budgets (validated at startup; unsafe or
+# out-of-range values abort the process -- see backend/app/impact/config.py and
+# docs/architecture/CONNECTOR_IMPACT.md). Conservative defaults shown.
+RATEGUARD_IMPACT_MAX_POLICIES: "50000"
+RATEGUARD_IMPACT_BATCH_SIZE: "200"
+RATEGUARD_IMPACT_MAX_INFLIGHT_BATCHES: "3"
+RATEGUARD_IMPACT_REQUEST_CONCURRENCY_PER_BATCH: "5"
+RATEGUARD_IMPACT_MAX_QPS: "120"
+RATEGUARD_IMPACT_REQUEST_TIMEOUT_SECONDS: "10"
+RATEGUARD_IMPACT_BATCH_TIMEOUT_SECONDS: "240"
+RATEGUARD_IMPACT_MAX_RETRY_ATTEMPTS: "3"
+RATEGUARD_IMPACT_MAX_BATCH_ATTEMPTS: "3"
+RATEGUARD_IMPACT_MAX_MISSION_SECONDS: "540"
+RATEGUARD_IMPACT_MAX_MISMATCH_EXAMPLES: "20"
+RATEGUARD_IMPACT_MAX_EVIDENCE_BYTES: "512000"
+RATEGUARD_IMPACT_TOPIC: "impact-batches"

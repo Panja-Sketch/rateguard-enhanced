@@ -46,6 +46,8 @@ export interface MockOptions {
   role?: 'ADMIN' | 'RELEASE_OWNER' | 'CONSUMER_REVIEWER' | 'VIEWER';
   /** Whether the Firebase sign-in endpoint accepts the credentials. */
   acceptCredentials?: boolean;
+  /** Extra API responses keyed by exact pathname (GET only), e.g. mission detail/impact. */
+  extraGet?: Record<string, unknown>;
 }
 
 /** Intercepts Firebase Auth REST calls and the RateGuard API; records every API call. */
@@ -135,6 +137,9 @@ export async function installMocks(page: Page, opts: MockOptions = {}): Promise<
       if (status === 401) return json(route, 401, { detail: { code: 'INVALID_TOKEN', message: 'token detail that must not be shown' } });
       if (status === 403) return json(route, 403, { detail: { code: 'INSUFFICIENT_ROLE', message: 'server side text' } });
       return json(route, 200, { missions: [], total_count: 0, limit: 50, offset: 0 });
+    }
+    if (request.method() === 'GET' && opts.extraGet && url.pathname in opts.extraGet) {
+      return json(route, 200, opts.extraGet[url.pathname]);
     }
     return json(route, 404, { detail: 'not found' });
   });

@@ -91,6 +91,8 @@ The API validates a mission request synchronously (~2ms), persists it as `QUEUED
 - **Independent Premium Oracle** — a deterministic pricing engine that computes expected premiums directly from IPIR; the LLM never performs pricing arithmetic.
 - **Premium reconciliation & root-cause analysis** — pinpoints the first divergent calculation node and explains why.
 - **50,000-policy blast-radius analysis** — runs the confirmed defect's boundary predicate against a synthetic Arizona HO3 portfolio in BigQuery to quantify affected-policy count and net financial exposure.
+- **Connector-backed portfolio impact** — when Source A is an authoritative controlled workbook and Source B is a versioned black-box REST rating engine, the full masked portfolio is repriced through the authoritative IPIR *and* the connector as durable, leased, idempotent Pub/Sub + Firestore batches (bounded concurrency/QPS, retry classification, circuit breaker, budgets, cancellation). Complete scan + no mismatch may `PASS`; a proven mismatch blocks (exposure labelled a lower bound when the scan is partial); an incomplete scan never passes. See [docs/architecture/CONNECTOR_IMPACT.md](docs/architecture/CONNECTOR_IMPACT.md).
+- **Evidence bundle export** — a tenant-scoped, deterministic `evidence-bundle-v1` ZIP (manifest with per-file SHA-256, connector metadata without credentials, probes, impact aggregate, decision, limitations) that fails closed on any secret- or PII-shaped content.
 - **Remediation & revalidation** — proposes an isolated patch and re-runs targeted + regression tests to prove the fix eliminates the exposure before recommending deployment.
 - **Full evidence lineage** — every stage's evidence (semantic diff results, Gemini invocation metadata, reconciliation traces) is persisted to Firestore/GCS and inspectable from the mission detail UI.
 
@@ -297,6 +299,8 @@ A pricing-assurance tool that reports a false `PASS` is worse than one that repo
 - **Product or jurisdiction mismatches are surfaced, not compared away.** Comparing a Homeowners source against a Personal Auto source, or two different states, isn't a meaningful equivalence check. RateGuard detects the metadata mismatch from the compiled packages and returns `REVIEW_REQUIRED` with the specific reason, instead of quietly running a comparison that was never apples-to-apples.
 
 ## Limitations
+
+Prompt 8 additions to the honest limitations list: the connector-backed scan excludes policies whose effective date is outside the authoritative source's effective period (reported as *out of scope*, not priced); single-quote-only connectors need `≈ rows / QPS` seconds for a 50,000-row scan and may end `PARTIAL`; the demo rating engine's fault injection is a demo-only hook; the API-level rate limits and 3-way autoscaling caps are challenge defaults. See [docs/implementation/STATUS.md](docs/implementation/STATUS.md) for the classified list.
 
 RateGuard is scoped to what it can verify end-to-end, not what would look impressive unverified:
 

@@ -101,7 +101,7 @@ def test_bundle_export_fails_closed_on_secret_or_pii():
         {"x.json": {"note": "Bearer abcdefghijklmnopqrstuvwxyz0123456789"}},
         {"x.json": {"api_key": "v"}},
         {"x.json": {"contact": "someone@example.org"}},
-        {"x.json": {"k": "-----BEGIN PRIVATE KEY-----"}},
+        {"x.json": {"k": "-----BEGIN PRIVATE KEY-----"}},  # pragma: allowlist secret
     ):
         with pytest.raises(EvidenceBundleError):
             scan_for_forbidden("x", bad["x.json"])

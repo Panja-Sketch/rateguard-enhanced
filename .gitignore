@@ -98,3 +98,7 @@ infrastructure/firestore-debug.log
 infrastructure/firebase-debug.log
 firestore-debug.log
 ui-debug.log
+
+# Release deployment bookkeeping (local)
+infrastructure/.release-digests.env
+infrastructure/.previous-revisions.env

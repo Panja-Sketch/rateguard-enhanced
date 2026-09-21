@@ -295,7 +295,7 @@ class FirestoreImpactStore(ImpactJobStore):
     def _to_batch(self, data: dict[str, Any] | None, tenant_id: str) -> BatchRecord | None:
         if not data or data.get("tenant_id") != tenant_id:
             return None
-        return BatchRecord.model_validate({k: v for k, v in data.items() if k != "expires_at"})
+        return BatchRecord.model_validate(_decode_rows({k: v for k, v in data.items() if k != "expires_at"}))
 
     def get_batch(self, tenant_id: str, job_id: str, batch_no: int) -> BatchRecord | None:
         snap = self._batch_ref(tenant_id, job_id, batch_no).get()
@@ -350,7 +350,7 @@ class FirestoreImpactStore(ImpactJobStore):
             payload = {**result, "state": state, "lease_owner": None, "lease_expires_at": None, "updated_at": now}
             if "matched" in result:  # a real result (not a lease release after a crash)
                 payload["completed_at"] = now
-            txn.update(ref, self._clean(payload))
+            txn.update(ref, self._clean(_encode_rows(payload)))
             return True
 
         return _txn(self._db.transaction())
@@ -372,6 +372,27 @@ class FirestoreImpactStore(ImpactJobStore):
 
         stored, created = _txn(self._db.transaction())
         return (ImpactJob.model_validate(stored) if stored else None), created
+
+
+_STORED_ROW_FIELDS = ("affected", "inconclusive", "out_of_scope")
+
+
+def _encode_rows(payload: dict[str, Any]) -> dict[str, Any]:
+    """Firestore forbids arrays nested in arrays: each `[idx, a, b]` row is stored
+    as a map `{"v": [idx, a, b]}` (arrays inside maps are allowed)."""
+    out = dict(payload)
+    for name in _STORED_ROW_FIELDS:
+        if name in out:
+            out[name] = [{"v": list(row)} for row in out[name]]
+    return out
+
+
+def _decode_rows(data: dict[str, Any]) -> dict[str, Any]:
+    out = dict(data)
+    for name in _STORED_ROW_FIELDS:
+        if name in out:
+            out[name] = [list(item["v"]) if isinstance(item, dict) else list(item) for item in out[name]]
+    return out
 
 
 _STORE: ImpactJobStore | None = None

@@ -4,16 +4,28 @@
       "collectionGroup": "assurance_runs",
       "queryScope": "COLLECTION",
       "fields": [
-        { "fieldPath": "tenant_id", "order": "ASCENDING" },
-        { "fieldPath": "created_at", "order": "DESCENDING" }
+        {
+          "fieldPath": "tenant_id",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "created_at",
+          "order": "DESCENDING"
+        }
       ]
     },
     {
       "collectionGroup": "assurance_runs_staging",
       "queryScope": "COLLECTION",
       "fields": [
-        { "fieldPath": "tenant_id", "order": "ASCENDING" },
-        { "fieldPath": "created_at", "order": "DESCENDING" }
+        {
+          "fieldPath": "tenant_id",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "created_at",
+          "order": "DESCENDING"
+        }
       ]
     }
   ],
@@ -23,7 +35,21 @@
       "fieldPath": "expires_at",
       "ttl": true,
       "indexes": [
-        { "order": "ASCENDING", "queryScope": "COLLECTION" }
+        {
+          "order": "ASCENDING",
+          "queryScope": "COLLECTION"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "batches",
+      "fieldPath": "expires_at",
+      "ttl": true,
+      "indexes": [
+        {
+          "order": "ASCENDING",
+          "queryScope": "COLLECTION"
+        }
       ]
     }
   ]

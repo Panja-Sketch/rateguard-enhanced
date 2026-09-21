@@ -140,7 +140,7 @@ def test_cancelled_mission_acks() -> None:
     fake_result.release_decision.data.status = "CANCELLED"
 
     def _fake_run_mission(
-        mission, left_pkg, right_pkg, target_connector=None, cancellation_check=None, control_cases=None
+        mission, left_pkg, right_pkg, target_connector=None, cancellation_check=None, control_cases=None, **_kwargs
     ):
         mission.status = MissionStatus.CANCELLED
         return fake_result
@@ -171,7 +171,7 @@ def test_no_duplicate_execution_under_redelivery() -> None:
     fake_result.release_decision.data.status = "PASS"
 
     def _fake_run_mission(
-        mission, left_pkg, right_pkg, target_connector=None, cancellation_check=None, control_cases=None
+        mission, left_pkg, right_pkg, target_connector=None, cancellation_check=None, control_cases=None, **_kwargs
     ):
         mission.status = MissionStatus.COMPLETED
         store.update_run_status(run_id=mission_id, status=AssuranceRunStatus.COMPLETED, workflow_stage="COMPLETED")
@@ -232,7 +232,7 @@ def test_no_duplicate_execution_under_redelivery_for_connector_backed_mission() 
     connector_call_count = {"n": 0}
 
     def _fake_run_mission(
-        mission, left_pkg, right_pkg, target_connector=None, cancellation_check=None, control_cases=None
+        mission, left_pkg, right_pkg, target_connector=None, cancellation_check=None, control_cases=None, **_kwargs
     ):
         assert target_connector is not None
         assert target_connector.connector_id == "rating-engine-demo"

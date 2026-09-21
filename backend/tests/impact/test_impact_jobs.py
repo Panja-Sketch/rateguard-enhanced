@@ -297,3 +297,16 @@ def test_config_validation_rejects_unsafe_values():
     ):
         with pytest.raises(RuntimeConfigError):
             resolve_impact_config(env)
+
+
+def test_evidence_size_budget_trims_examples_but_not_totals(snapshot, package):
+    h = make_harness(snapshot, package, config=fast_config(max_evidence_bytes=10_000))
+    job, snap = h.plan(snapshot, package, version="defective-v1")
+    a = h.run(job, snap, package)
+    h.dispatcher.close()
+    full = make_harness(snapshot, package)
+    job2, snap2 = full.plan(snapshot, package, version="defective-v1", mission="MIS-T2")
+    b = full.run(job2, snap2, package)
+    full.dispatcher.close()
+    assert a.budget["evidence_bytes"] <= 10_000 and "mismatch_examples" in a.budget["evidence_trimmed"]
+    assert a.mismatches == b.mismatches and a.absolute_exposure == b.absolute_exposure

@@ -49,7 +49,7 @@ def test_unverifiable_token_is_401(api):
 
 
 def test_error_bodies_never_echo_the_token(api):
-    secret = "super-secret-looking-token-value"
+    secret = "super-secret-looking-token-value"  # pragma: allowlist secret
     responses = (
         api.get(PROTECTED, headers=bearer(secret)),
         api.get(PROTECTED, headers={"Authorization": "Basic " + secret}),

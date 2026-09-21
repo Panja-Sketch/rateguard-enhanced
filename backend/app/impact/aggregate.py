@@ -293,4 +293,24 @@ def aggregate_job(
     core = agg.model_dump(mode="json", exclude={"budget", "batch_seconds_total", "retry_count", "request_count", "error_classes",
                                                   "breaker_opened", "result_sha256", "provenance"})
     agg.result_sha256 = hashlib.sha256(json.dumps(core, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    return _enforce_evidence_budget(agg, config.max_evidence_bytes)
+
+
+def _enforce_evidence_budget(agg: ImpactAggregate, max_bytes: int) -> ImpactAggregate:
+    """Keeps the stored/exported aggregate within `max_evidence_bytes` by
+    dropping mismatch examples (last first), then cohort detail. Totals and the
+    result hash are unaffected; what was trimmed is recorded in the budget."""
+    def size() -> int:
+        return len(agg.model_dump_json().encode("utf-8"))
+
+    trimmed: list[str] = []
+    while size() > max_bytes and agg.mismatch_examples:
+        agg.mismatch_examples.pop()
+        if "mismatch_examples" not in trimmed:
+            trimmed.append("mismatch_examples")
+    if size() > max_bytes and agg.cohort_distribution:
+        agg.cohort_distribution = {**agg.cohort_distribution, "cohorts": []}
+        trimmed.append("cohort_distribution")
+    agg.budget["evidence_bytes"] = size()
+    agg.budget["evidence_trimmed"] = trimmed
     return agg

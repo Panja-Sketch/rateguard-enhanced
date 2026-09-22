@@ -329,6 +329,19 @@ deploy_candidate() {
     --no-allow-unauthenticated --service-account "$WORKER_SA" \
     --memory=1Gi --env-vars-file="$CANDIDATE_ENV_FILE_WORKER"
 
+  # The connector base URL(s) can only be known once the candidate
+  # rating-engine's tagged URL is resolved (above), so they can't live in
+  # the static env-vars-file written before any deploy happens -- wired in
+  # here via --update-env-vars, the same pattern already used for the web
+  # origin CORS wiring below. Without this, the worker's connector client
+  # falls back to Settings' http://127.0.0.1:8000 default and every
+  # connector-backed mission on this candidate fails closed with
+  # CONNECTOR_TRANSPORT_ERROR (both rating-engine-demo and
+  # vendor-gateway-demo point at the same rating-engine service today).
+  echo "   Wiring candidate rating-engine connector URL into worker..."
+  gcloud run services update rateguard-worker --region "$REGION" --no-traffic --tag "$CANDIDATE_TAG" \
+    --update-env-vars "RATEGUARD_RATING_ENGINE_CONNECTOR_BASE_URL=${RATING_ENGINE_TAGGED_URL},RATEGUARD_RATING_ENGINE_CONNECTOR_IS_LOCAL_DEV=false,RATEGUARD_RATING_ENGINE_CONNECTOR_AUTH_MODE=google_id_token,RATEGUARD_VENDOR_GATEWAY_CONNECTOR_BASE_URL=${RATING_ENGINE_TAGGED_URL}"
+
   WORKER_TAGGED_URL=$(get_tagged_url rateguard-worker)
   WORKER_UNTAGGED_URL=$(get_untagged_url rateguard-worker)
   if [ -z "$WORKER_TAGGED_URL" ] || [ -z "$WORKER_UNTAGGED_URL" ]; then
@@ -340,6 +353,13 @@ deploy_candidate() {
   echo "   Granting worker SA run.invoker on rateguard-rating-engine (narrow, service-scoped)..."
   gcloud run services add-iam-policy-binding rateguard-rating-engine \
     --region "$REGION" --member="serviceAccount:${WORKER_SA}" --role="roles/run.invoker" >/dev/null
+
+  # The API service also calls the connector directly (POST
+  # /api/v1/connectors/{id}/test, an admin-only golden-case health check),
+  # so it needs the same narrow, service-scoped invoker grant as the worker.
+  echo "   Granting API SA run.invoker on rateguard-rating-engine (narrow, service-scoped)..."
+  gcloud run services add-iam-policy-binding rateguard-rating-engine \
+    --region "$REGION" --member="serviceAccount:${API_SA}" --role="roles/run.invoker" >/dev/null
 
   PROJECT_NUMBER=$(gcloud projects describe "$PROJECT_ID" --format="value(projectNumber)")
   PUBSUB_SERVICE_AGENT="service-${PROJECT_NUMBER}@gcp-sa-pubsub.iam.gserviceaccount.com"
@@ -390,6 +410,12 @@ deploy_candidate() {
     --no-traffic --tag "$CANDIDATE_TAG" \
     --allow-unauthenticated --service-account "$API_SA" \
     --memory=512Mi --env-vars-file="$CANDIDATE_ENV_FILE_API"
+
+  # Same wiring as the worker above -- the API service also drives
+  # ConnectorClient directly (app/api/connectors.py's connector-test route).
+  echo "   Wiring candidate rating-engine connector URL into API..."
+  gcloud run services update rateguard-api --region "$REGION" --no-traffic --tag "$CANDIDATE_TAG" \
+    --update-env-vars "RATEGUARD_RATING_ENGINE_CONNECTOR_BASE_URL=${RATING_ENGINE_TAGGED_URL},RATEGUARD_RATING_ENGINE_CONNECTOR_IS_LOCAL_DEV=false,RATEGUARD_RATING_ENGINE_CONNECTOR_AUTH_MODE=google_id_token,RATEGUARD_VENDOR_GATEWAY_CONNECTOR_BASE_URL=${RATING_ENGINE_TAGGED_URL}"
 
   API_TAGGED_URL=$(get_tagged_url rateguard-api)
   if [ -z "$API_TAGGED_URL" ]; then

@@ -206,6 +206,11 @@ class ConnectorClient:
                 status_code, body = await self._do_request(
                     entry, payload, correlation_id, path=path, method=method
                 )
+                if status_code >= 400:
+                    logger.warning(
+                        "connector_error_body_diagnostic correlation_id=%s status=%s body=%r",
+                        correlation_id, status_code, body[:1000],
+                    )
                 self._raise_for_status(status_code, correlation_id)
                 return parse(body)
             except ConnectorException as exc:

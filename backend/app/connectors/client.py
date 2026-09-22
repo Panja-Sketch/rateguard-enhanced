@@ -56,27 +56,6 @@ _ID_TOKEN_TTL_SECONDS = 45 * 60
 _id_token_cache: dict[str, tuple[float, str]] = {}
 
 
-def _decode_jwt_aud_unverified(token: str) -> str:
-    """Diagnostic-only: decodes identity claims from a JWT's payload without
-    verifying the signature, purely to confirm what audience/identity was
-    actually embedded in a minted ID token (never used for any trust
-    decision)."""
-    import base64
-    import json as _json
-
-    try:
-        payload_b64 = token.split(".")[1]
-        padded = payload_b64 + "=" * (-len(payload_b64) % 4)
-        claims = _json.loads(base64.urlsafe_b64decode(padded))
-        return (
-            f"aud={claims.get('aud')!r} email={claims.get('email')!r} "
-            f"sub={claims.get('sub')!r} azp={claims.get('azp')!r} "
-            f"iss={claims.get('iss')!r} exp={claims.get('exp')!r} iat={claims.get('iat')!r}"
-        )
-    except Exception as exc:  # noqa: BLE001 - diagnostic only, never raises
-        return f"<decode failed: {type(exc).__name__}>"
-
-
 def _fetch_google_id_token(audience: str) -> str:
     """Mints (and briefly caches) a Google ID token for `audience` from the
     runtime identity via ADC. Blocking; call via `asyncio.to_thread`."""
@@ -206,11 +185,6 @@ class ConnectorClient:
                 status_code, body = await self._do_request(
                     entry, payload, correlation_id, path=path, method=method
                 )
-                if status_code >= 400:
-                    logger.warning(
-                        "connector_error_body_diagnostic correlation_id=%s status=%s body=%r",
-                        correlation_id, status_code, body[:1000],
-                    )
                 self._raise_for_status(status_code, correlation_id)
                 return parse(body)
             except ConnectorException as exc:
@@ -407,13 +381,7 @@ class ConnectorClient:
                     correlation_id=correlation_id,
                 )
             try:
-                requested_audience = entry.base_url.rstrip("/")
-                id_tok = await asyncio.to_thread(_fetch_google_id_token, requested_audience)
-                import time as _time
-                logger.warning(
-                    "connector_id_token_diagnostic correlation_id=%s requested_audience=%r now=%s claims=[%s]",
-                    correlation_id, requested_audience, int(_time.time()), _decode_jwt_aud_unverified(id_tok),
-                )
+                id_tok = await asyncio.to_thread(_fetch_google_id_token, entry.base_url.rstrip("/"))
             except Exception as exc:  # noqa: BLE001 - never leak credential/library text
                 logger.warning(
                     "connector_id_token_unavailable correlation_id=%s error_type=%s",

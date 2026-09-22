@@ -17,6 +17,12 @@
 # SAFETY: by default (no --deploy-candidate flag) this performs ZERO
 # gcloud/network calls -- it only runs `git rev-parse` (local) and prints the
 # full plan. Nothing here ever modifies production traffic.
+#
+# IMPORTANT: a plain `gcloud run services update-traffic ... =100` on the
+# revisions this script builds is NOT a full promotion -- they stay wired to
+# the isolated STAGING resources above, and rateguard-web's API URL is a
+# build-time constant that a traffic shift can never change. Use
+# promote_candidate_to_production.sh once a candidate has been tested here.
 
 set -euo pipefail
 

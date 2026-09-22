@@ -56,6 +56,22 @@ _ID_TOKEN_TTL_SECONDS = 45 * 60
 _id_token_cache: dict[str, tuple[float, str]] = {}
 
 
+def _decode_jwt_aud_unverified(token: str) -> str:
+    """Diagnostic-only: decodes the `aud` claim from a JWT's payload without
+    verifying the signature, purely to confirm what audience was actually
+    embedded in a minted ID token (never used for any trust decision)."""
+    import base64
+    import json as _json
+
+    try:
+        payload_b64 = token.split(".")[1]
+        padded = payload_b64 + "=" * (-len(payload_b64) % 4)
+        claims = _json.loads(base64.urlsafe_b64decode(padded))
+        return claims.get("aud", "<no aud claim>")
+    except Exception as exc:  # noqa: BLE001 - diagnostic only, never raises
+        return f"<decode failed: {type(exc).__name__}>"
+
+
 def _fetch_google_id_token(audience: str) -> str:
     """Mints (and briefly caches) a Google ID token for `audience` from the
     runtime identity via ADC. Blocking; call via `asyncio.to_thread`."""
@@ -381,7 +397,12 @@ class ConnectorClient:
                     correlation_id=correlation_id,
                 )
             try:
-                id_tok = await asyncio.to_thread(_fetch_google_id_token, entry.base_url.rstrip("/"))
+                requested_audience = entry.base_url.rstrip("/")
+                id_tok = await asyncio.to_thread(_fetch_google_id_token, requested_audience)
+                logger.warning(
+                    "connector_id_token_diagnostic correlation_id=%s requested_audience=%r minted_aud=%r",
+                    correlation_id, requested_audience, _decode_jwt_aud_unverified(id_tok),
+                )
             except Exception as exc:  # noqa: BLE001 - never leak credential/library text
                 logger.warning(
                     "connector_id_token_unavailable correlation_id=%s error_type=%s",

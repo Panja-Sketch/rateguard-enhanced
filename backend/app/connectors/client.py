@@ -57,9 +57,10 @@ _id_token_cache: dict[str, tuple[float, str]] = {}
 
 
 def _decode_jwt_aud_unverified(token: str) -> str:
-    """Diagnostic-only: decodes the `aud` claim from a JWT's payload without
-    verifying the signature, purely to confirm what audience was actually
-    embedded in a minted ID token (never used for any trust decision)."""
+    """Diagnostic-only: decodes identity claims from a JWT's payload without
+    verifying the signature, purely to confirm what audience/identity was
+    actually embedded in a minted ID token (never used for any trust
+    decision)."""
     import base64
     import json as _json
 
@@ -67,7 +68,11 @@ def _decode_jwt_aud_unverified(token: str) -> str:
         payload_b64 = token.split(".")[1]
         padded = payload_b64 + "=" * (-len(payload_b64) % 4)
         claims = _json.loads(base64.urlsafe_b64decode(padded))
-        return claims.get("aud", "<no aud claim>")
+        return (
+            f"aud={claims.get('aud')!r} email={claims.get('email')!r} "
+            f"sub={claims.get('sub')!r} azp={claims.get('azp')!r} "
+            f"iss={claims.get('iss')!r} exp={claims.get('exp')!r} iat={claims.get('iat')!r}"
+        )
     except Exception as exc:  # noqa: BLE001 - diagnostic only, never raises
         return f"<decode failed: {type(exc).__name__}>"
 
@@ -399,9 +404,10 @@ class ConnectorClient:
             try:
                 requested_audience = entry.base_url.rstrip("/")
                 id_tok = await asyncio.to_thread(_fetch_google_id_token, requested_audience)
+                import time as _time
                 logger.warning(
-                    "connector_id_token_diagnostic correlation_id=%s requested_audience=%r minted_aud=%r",
-                    correlation_id, requested_audience, _decode_jwt_aud_unverified(id_tok),
+                    "connector_id_token_diagnostic correlation_id=%s requested_audience=%r now=%s claims=[%s]",
+                    correlation_id, requested_audience, int(_time.time()), _decode_jwt_aud_unverified(id_tok),
                 )
             except Exception as exc:  # noqa: BLE001 - never leak credential/library text
                 logger.warning(

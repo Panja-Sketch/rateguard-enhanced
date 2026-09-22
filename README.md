@@ -2,7 +2,7 @@
 
 RateGuard AI is a vendor-neutral, agentic insurance pricing assurance platform. It independently verifies that insurance pricing logic stays semantically correct as it moves from a regulatory filing, through an actuarial spec, into a rating engine implementation — catching silent pricing defects before they reach production.
 
-**Production URL:** https://rateguard-web-iqofutwtva-uc.a.run.app
+**Production URL:** https://rateguard-web-nwhotixfva-uc.a.run.app
 
 ---
 
@@ -175,7 +175,7 @@ RateGuard compiles native IPIR JSON directly — no LLM extraction, no best-effo
 
 **Expected compilation output** — on a successful `POST /api/sources/compile`, the response includes a `compilation_receipt` built directly from the compiled `IPIRPackage` (no fabricated or fallback data): `product`, `product_line`, `jurisdiction`, `effective_period_start`/`end`, and counts of `inputs`, `constants`, `tables` (plus total row count across all tables), `calculations`, and `outputs` (with their node IDs). The Sources page renders this receipt after every successful compile so you can confirm exactly what RateGuard parsed before launching a mission.
 
-**Running a clean vs. intentional-drift comparison:** `frontend/public/samples/rateguard-source-template-b-drift.json` is identical to the template above except the `21+` roof-age factor is `1.25` instead of `1.35`. Upload the first as Source A and the second as Source B on the [Sources](https://rateguard-web-iqofutwtva-uc.a.run.app/sources) page, then launch an Equivalence mission — RateGuard reports a genuine semantic diff on `roof_age_factor` and a real premium delta ($675.00 vs. $625.00 at `roof_age=25`), not a synthetic canned result. Uploading the same file twice for both sides instead produces zero diffs and a `PASS`.
+**Running a clean vs. intentional-drift comparison:** `frontend/public/samples/rateguard-source-template-b-drift.json` is identical to the template above except the `21+` roof-age factor is `1.25` instead of `1.35`. Upload the first as Source A and the second as Source B on the [Sources](https://rateguard-web-nwhotixfva-uc.a.run.app/sources) page, then launch an Equivalence mission — RateGuard reports a genuine semantic diff on `roof_age_factor` and a real premium delta ($675.00 vs. $625.00 at `roof_age=25`), not a synthetic canned result. Uploading the same file twice for both sides instead produces zero diffs and a `PASS`.
 
 ## Supported Source Format: Controlled Workbook v1 (.xlsx)
 
@@ -290,7 +290,7 @@ Deployment to Google Cloud Run follows a staged pipeline, implemented in `infras
 
 ## Demo Steps
 
-1. Open the [production site](https://rateguard-web-iqofutwtva-uc.a.run.app).
+1. Open the [production site](https://rateguard-web-nwhotixfva-uc.a.run.app).
 2. Visit **Missions → New Mission**, pick **Release Conformance**, and run the bundled Arizona HO3 canonical-vs-defective scenario — expect a `BLOCK_DEPLOYMENT` decision with a quantified financial exposure and a proposed remediation.
 3. Run the same wizard again with the **clean control** target — expect `PASS` with zero diffs, and note the "Gemini not invoked by design" messaging.
 4. Pick **Equivalence** mode and run it — note that Material Findings, Blast Radius, and every other tab use neutral "Source A" / "Source B" language throughout, never "intent" or "defective." Open the **Alignment Options** tab: no directional patch exists yet (Gemini's decision there was the neutral `PROPOSE_ALIGNMENT_OPTIONS`, not a proposed fix) — pick either Source A or Source B as the reference to generate one on demand, then pick the other to see the patch flip direction.

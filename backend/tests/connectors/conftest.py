@@ -175,3 +175,16 @@ def real_demo_entry() -> ConnectorRegistryEntry:
         display_name="Test Demo Rating Engine",
         allowed_engine_versions=("canonical-v1", "defective-v1"),
     )
+
+
+@pytest.fixture
+def real_vendor_gateway_entry() -> ConnectorRegistryEntry:
+    """Same real `backend/rating_engine` ASGI app as `real_demo_entry`, but
+    selected via the differently-shaped `vendor_gateway_v1` wire format
+    (`/vendor/rate-quote`) instead of `rateguard_native_v1` (`/quote`)."""
+    return make_registry_entry(
+        connector_id="vendor-gateway-demo-test",
+        display_name="Test Vendor Gateway",
+        allowed_engine_versions=("canonical-v1", "defective-v1"),
+        wire_format="vendor_gateway_v1",
+    )

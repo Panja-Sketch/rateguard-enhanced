@@ -52,22 +52,41 @@ class IPIRPackage(BaseModel):
     transaction_types: list[TransactionType] = Field(
         default_factory=lambda: [TransactionType.NEW_BUSINESS, TransactionType.RENEWAL]
     )
-    inputs: list[PricingInput] = Field(default_factory=list)
-    constants: list[PricingConstant] = Field(default_factory=list)
-    tables: list[RateTable] = Field(default_factory=list)
+    # Documented as required top-level fields (README "Required top-level
+    # fields" table): a source that omits these entirely must be rejected at
+    # schema validation (422), not silently accepted as an empty/degenerate
+    # package. `Field(...)` requires the key to be present; the non-empty
+    # check below (validate_package) additionally requires calculations and
+    # outputs to carry real content, since a compiled source with zero of
+    # either has nothing to price and previously crashed mid-pipeline instead
+    # of being rejected up front.
+    inputs: list[PricingInput] = Field(...)
+    constants: list[PricingConstant] = Field(...)
+    tables: list[RateTable] = Field(...)
     rules: list[PricingRule] = Field(default_factory=list)
-    calculations: list[CalculationNode] = Field(default_factory=list)
+    calculations: list[CalculationNode] = Field(...)
     rounding_rules: list[RoundingRule] = Field(default_factory=list)
     modifiers: list[PricingModifier] = Field(default_factory=list)
     constraints: list[PremiumConstraint] = Field(default_factory=list)
     fees: list[PricingFee] = Field(default_factory=list)
     coverages: list[CoverageDefinition] = Field(default_factory=list)
-    outputs: list[PricingOutput] = Field(default_factory=list)
+    outputs: list[PricingOutput] = Field(...)
     provenance: Provenance | None = None
 
     @model_validator(mode="after")
     def validate_package(self) -> "IPIRPackage":
         self.id = validate_identifier_string(self.id)
+
+        if not self.calculations:
+            raise ValueError(
+                "IPIRPackage 'calculations' must contain at least one node: a "
+                "package with zero calculations defines no pricing logic to price."
+            )
+        if not self.outputs:
+            raise ValueError(
+                "IPIRPackage 'outputs' must contain at least one node: a package "
+                "with zero outputs defines no outputs to compare or price."
+            )
 
         # 1. Duplicate ID validation across semantic entities
         seen_ids: dict[str, str] = {}

@@ -21,6 +21,14 @@ class Settings(BaseSettings):
     # CORS configuration
     cors_origins: list[str] = ["http://localhost:3000", "http://localhost:8000"]
 
+    # Optional scoped, read-only demo API key: lets a judge/insurer's own
+    # script call the API directly (see README "External API Access")
+    # without a Firebase session. Unset (default) disables the feature
+    # entirely -- no header is ever accepted as a credential unless this is
+    # explicitly configured. Always maps to VIEWER role only, never higher.
+    demo_api_key: str | None = None
+    demo_api_key_tenant_id: str = "demo"
+
     # BigQuery Configuration
     bigquery_enabled: bool = False
     bigquery_dataset: str = "rateguard"
@@ -52,6 +60,12 @@ class Settings(BaseSettings):
     # (audience = the connector's base URL) minted from the runtime service
     # account via ADC, for a private Cloud Run target. No secret is stored.
     rating_engine_connector_auth_mode: str = "none"
+    # Base URL for the second, differently-wire-shaped demo connector
+    # ("vendor-gateway-demo", see app/connectors/registry.py). Defaults to
+    # `rating_engine_connector_base_url` (the same demo service exposes
+    # both `/quote*` and `/vendor/rate-quote`) so no extra deployment is
+    # required; a real second vendor target only needs this overridden.
+    vendor_gateway_connector_base_url: str | None = None
 
     # Which routes this process serves. The API and worker share one image
     # (locked doc 12.1) but must not share a surface: `api` serves the

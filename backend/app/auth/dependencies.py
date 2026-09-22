@@ -18,6 +18,7 @@ docs/security/AUTHORIZATION_MATRIX.md).
 
 import logging
 import re
+import secrets
 from collections.abc import Callable
 from functools import lru_cache
 
@@ -61,11 +62,36 @@ def _extract_bearer_token(request: Request) -> str:
     return match.group(1)
 
 
+def _demo_api_key_user(request: Request) -> AuthenticatedUser | None:
+    """Optional scoped, read-only credential for external scripts (README
+    "External API Access") -- an `X-RateGuard-Api-Key` header checked
+    against `Settings.demo_api_key`. Returns None (falls through to the
+    normal Firebase bearer-token path) whenever the feature is unconfigured
+    or the header is absent, so it can never weaken the default auth
+    posture. Always resolves to VIEWER (read-only) -- there is no way for a
+    caller to obtain a higher role through this path."""
+    settings = get_settings()
+    if not settings.demo_api_key:
+        return None
+    supplied = request.headers.get("x-rateguard-api-key")
+    if not supplied:
+        return None
+    if not secrets.compare_digest(supplied, settings.demo_api_key):
+        logger.warning("AUTH_DENIED reason=invalid_demo_api_key path=%s", request.url.path)
+        raise unauthorized("INVALID_API_KEY")
+    return AuthenticatedUser(
+        uid="demo-api-key", tenant_id=settings.demo_api_key_tenant_id, role=Role.VIEWER, email=None
+    )
+
+
 def get_current_user(
     request: Request,
     verifier: TokenVerifier = Depends(get_token_verifier),
     directory: UserDirectory = Depends(get_user_directory),
 ) -> AuthenticatedUser:
+    demo_user = _demo_api_key_user(request)
+    if demo_user is not None:
+        return demo_user
     token = _extract_bearer_token(request)
     try:
         verified = verifier.verify(token)

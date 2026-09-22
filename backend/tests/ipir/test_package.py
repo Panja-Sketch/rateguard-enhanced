@@ -47,6 +47,7 @@ def test_full_ipir_package_creation() -> None:
             )
         ],
         constants=[PricingConstant(id="base_rate", name="Base Rate", value=Decimal("500.00"))],
+        tables=[],
         calculations=[
             CalculationNode(
                 id="total_premium",
@@ -120,6 +121,21 @@ def test_duplicate_node_id_rejection() -> None:
             constants=[
                 PricingConstant(id="base_rate", name="Base Rate Constant", value=Decimal("500.00"))
             ],
+            tables=[],
+            calculations=[
+                CalculationNode(
+                    id="total_premium",
+                    name="Total Premium",
+                    expression=Expression(
+                        operator=ExpressionOperator.MULTIPLY,
+                        operands=[NodeReference(ref="base_rate"), LiteralValue(value=Decimal("1.10"))],
+                    ),
+                    depends_on=["base_rate"],
+                )
+            ],
+            outputs=[
+                PricingOutput(id="final_premium", name="Final Premium", source_ref="total_premium")
+            ],
         )
 
 
@@ -136,6 +152,19 @@ def test_nonexistent_output_source_ref_rejection() -> None:
                 jurisdiction=Jurisdiction(country="US", state_or_province="AZ"),
             ),
             effective_period=EffectivePeriod(start=date(2026, 1, 1)),
+            inputs=[],
+            constants=[],
+            tables=[],
+            calculations=[
+                CalculationNode(
+                    id="some_calc",
+                    name="Some Calc",
+                    expression=Expression(
+                        operator=ExpressionOperator.MULTIPLY,
+                        operands=[LiteralValue(value=Decimal("1.0")), LiteralValue(value=Decimal("1.0"))],
+                    ),
+                )
+            ],
             outputs=[PricingOutput(id="final_out", name="Final Output", source_ref="missing_node")],
         )
 

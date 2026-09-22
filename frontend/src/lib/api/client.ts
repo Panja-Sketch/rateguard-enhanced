@@ -391,6 +391,7 @@ export interface ConnectorMetadata {
   connector_id: string;
   display_name: string;
   allowed_engine_versions: string[];
+  wire_format: string;
   last_health_check_status: string | null;
 }
 

@@ -27,7 +27,7 @@ RateGuard runs a mandatory deterministic evidence pipeline unconditionally (vali
 
 | Decision point | What Gemini decides | Fires when |
 | :--- | :--- | :--- |
-| `CHOOSE_EXTRACTION_STRATEGY` | Which extractor to use for a genuinely ambiguous uploaded source | Excel/PDF extraction is currently disabled in production (see [Supported Source Formats](#supported-source-formats)); this decision point exists in code but is not reachable via the live upload path today |
+| `CHOOSE_EXTRACTION_STRATEGY` | Which extractor to use for a genuinely ambiguous uploaded source | Arbitrary/legacy Excel and PDF extraction is out of scope in production (see [Supported Source Formats](#supported-source-formats)); this decision point exists in code but is not reachable via the live upload path today. The Controlled Workbook v1 `.xlsx` path is fully deterministic and never reaches this decision point at all. |
 | `PRIORITIZE_DIFFERENCES` | Which already-detected semantic differences deserve focused boundary testing | Whenever semantic differences exist |
 | `SELECT_BOUNDARY_TESTS` | Which deterministically-generated candidate boundary tests to execute | Whenever semantic differences exist |
 | `EVIDENCE_SUFFICIENCY` | Whether one more bounded round of probes is worth running (capped at `MAX_PROBE_ROUNDS`) | After the first boundary-test round |
@@ -101,10 +101,11 @@ The API validates a mission request synchronously (~2ms), persists it as `QUEUED
 | Format | Status |
 | :--- | :--- |
 | Native IPIR / structured JSON | **Supported** — deterministically compiled, strict schema validation, structured 422 errors on failure |
-| Excel workbooks, PDF filings | **Not supported today.** Upload is rejected server-side (`400`) rather than silently accepted. The adapter code exists in `backend/app/adapters/` but has no verified extraction accuracy against real filings, so it is not exposed through the API — see [The Deterministic Boundary](#the-deterministic-boundary) for why RateGuard will not claim a compilation it can't stand behind. |
+| RateGuard Controlled Workbook v1 (`.xlsx`) | **Supported**, under a documented, fixed `RG_*` sheet/column contract and a safe calculation mini-DSL — not arbitrary Excel. See [Supported Source Format: Controlled Workbook v1 (.xlsx)](#supported-source-format-controlled-workbook-v1-xlsx) below. |
+| Arbitrary/legacy Excel (`.xls`, macros, OLE, external links), PDF filings | **Out of scope by design, not "not yet built."** Upload is rejected server-side rather than silently approximated. The legacy adapter code in `backend/app/adapters/` has no verified extraction accuracy against real filings, so RateGuard will not claim a compilation it can't stand behind — see [The Deterministic Boundary](#the-deterministic-boundary). |
 | YAML, CSV | **Not implemented.** No adapter exists; there is no UI path to upload one. |
 
-RateGuard intentionally does not claim to analyze an arbitrary spreadsheet or filing PDF — only what it can genuinely and verifiably compile end-to-end. Every uploaded source is compiled through the same deterministic strict-schema path described below, and every compiled package is assigned a namespaced identity (`{ipir_package_id}--{source_id}`) so two different uploads can never collide, even if their internal `id` fields happen to match.
+RateGuard intentionally does not claim to analyze an arbitrary spreadsheet or filing PDF — only what it can genuinely and verifiably compile end-to-end. Every uploaded source is compiled through a deterministic strict-schema path (either the JSON schema below, or the Controlled Workbook v1 contract, which is itself compiled into the same canonical IPIR representation), and every compiled package is assigned a namespaced identity (`{ipir_package_id}--{source_id}`) so two different uploads can never collide, even if their internal `id` fields happen to match.
 
 ## Supported Source Format: JSON Schema
 
@@ -176,9 +177,65 @@ RateGuard compiles native IPIR JSON directly — no LLM extraction, no best-effo
 
 **Running a clean vs. intentional-drift comparison:** `frontend/public/samples/rateguard-source-template-b-drift.json` is identical to the template above except the `21+` roof-age factor is `1.25` instead of `1.35`. Upload the first as Source A and the second as Source B on the [Sources](https://rateguard-web-iqofutwtva-uc.a.run.app/sources) page, then launch an Equivalence mission — RateGuard reports a genuine semantic diff on `roof_age_factor` and a real premium delta ($675.00 vs. $625.00 at `roof_age=25`), not a synthetic canned result. Uploading the same file twice for both sides instead produces zero diffs and a `PASS`.
 
+## Supported Source Format: Controlled Workbook v1 (.xlsx)
+
+RateGuard also compiles a real `.xlsx` workbook — never an arbitrary spreadsheet — under a fixed, documented contract (`backend/app/ingestion/workbook_v1/`), fully deterministic like the JSON path: no LLM extraction, no best-effort field guessing. Uploads that don't match the contract are rejected server-side with the exact sheet/cell/function location, not silently approximated.
+
+**Why a fixed contract instead of "read any spreadsheet":** the same verifiability stance as [The Deterministic Boundary](#the-deterministic-boundary) below — RateGuard will not claim to have compiled pricing logic it can't stand behind. A hand-formatted actuarial workbook has no reliable, universal structure to parse; a fixed `RG_*` contract does.
+
+**Required sheets and columns:**
+
+| Sheet | Required columns | Notes |
+| :--- | :--- | :--- |
+| `RG_METADATA` | `key`, `value` | Flat key/value pairs. Required keys: `package_id`, `product_id`, `line`, `country`, `currency`, `effective_start`. Optional: `state`, `package_version`, `transaction_types` (comma-separated), `effective_end`. |
+| `RG_INPUTS` | `id`, `name`, `data_type`, `required`, `minimum`, `maximum`, `allowed_values` | `data_type` is one of `INTEGER`/`DECIMAL`/`MONEY`/`STRING`/`BOOLEAN`/`CATEGORY`/`DATE`. `allowed_values` is comma-separated. |
+| `RG_CONSTANTS` | `id`, `name`, `value` | Named fixed decimal values. |
+| `RG_TABLES` | `table_id`, `dimension_id`, `min`, `max`, `include_min`, `include_max`, `match_value`, `result_value`, `priority` | One row per lookup bucket; rows sharing a `table_id` must share one `dimension_id`. Either a `min`/`max` range or a `match_value` exact match per row, never both. |
+| `RG_CALCULATIONS` | `node_id`, `operator`, `operand_1`, `operand_2`, `rounding_mode`, `scale` | The entire supported operator vocabulary: `ADD SUBTRACT MULTIPLY DIVIDE MIN MAX ROUND LOOKUP IF`. This is a controlled mini-DSL, never a live Excel formula — a cell containing a raw `=FUNC(...)`-shaped string is rejected outright (with its sheet/cell/function name) even outside this sheet's own grammar. |
+| `RG_OUTPUTS` | `output_id`, `source_ref`, `currency` | `source_ref` must point at a `RG_CALCULATIONS` node whose top-level operator is `ROUND` — every output's rounding contract must be explicit and declared, not implicit. |
+| `RG_CONTROL_CASES` | `case_id`, `input`, `expected_output`, `tolerance` | `input`/`expected_output` are JSON objects (as text, e.g. `{"roof_age": 25}`). At least one passing control case is required for a `VERIFIED` compilation (a structurally valid but unverified workbook compiles as `REVIEW_REQUIRED`, not a false `VERIFIED`). |
+
+All identifiers (`package_id`, every `id`/`node_id`/`output_id`/`table_id`) must match `^[a-z][a-z0-9_]{1,63}$` — lowercase, matching IPIR v0.2's stricter identifier pattern. Current deployment scope is `currency=USD`, `country=US`, `state=AZ` only (Arizona homeowners), matching the bundled portfolio dataset; other values are rejected as unsupported, not silently normalized.
+
+**Explicitly rejected, by design:** legacy `.xls`, macro-enabled/VBA workbooks, OLE objects, external links, password protection, any sheet/column outside the `RG_*` contract, and any raw Excel formula (only the mini-DSL above is interpreted).
+
+**Sample workbooks** (downloadable from the Sources page, or directly at `frontend/public/samples/`): `rateguard-workbook-sample.xlsx` and its drift-pair twin `rateguard-workbook-sample-b-drift.xlsx` — the same roof-age-factor drift (`1.35` vs `1.25` at `roof_age >= 21`) as the JSON template pair above, driven entirely from `.xlsx`. Both compile to `VERIFIED` with all embedded control cases passing.
+
 ## The Deterministic Boundary
 
 This is the architectural guarantee the whole system is built around: **Gemini reasons, plans, and explains — it never computes a premium, a financial exposure figure, or a policy count.** All arithmetic (rate table lookups, expression evaluation, rounding, DAG traversal, SQL aggregation over the 50K portfolio) is untouched deterministic Python. Gemini's only discretion is *which* deterministically-generated candidate (a difference, a test scenario, a remediation option) gets investigated next — every ID it returns is validated against the candidate pool before anything executes, and a hallucinated ID is simply rejected, falling back to the deterministic default.
+
+## Live Connector / Black-Box API Validation
+
+The most differentiated part of RateGuard, and the part that answers "what makes this different from a script that diffs two JSON files": you don't need a vendor's source code to validate their rating engine against it, only a running API. Source B can be a **live connector** instead of a compiled IPIR package — RateGuard fires real HTTP requests at it, compares every returned premium against its own deterministic Premium Oracle's expected value, and rolls the result into portfolio-scale exposure and fairness evidence, all without parsing a single line of the target's code.
+
+**How it works:**
+
+1. **Registration, not a free-text URL.** RateGuard never accepts an arbitrary URL for a mission — only a connector an administrator has already registered (`app.connectors.registry`, `GET /connectors`). A registered connector declares a `connector_id`, `base_url`, its allowed `engine_version`s, and a `wire_format` (below). Registration today is config-driven — a new `ConnectorRegistryEntry` in `_build_registry()` plus a `base_url`/auth setting — deliberately not a database-backed CRUD admin UI (a persistent, mutable connector store is future work); adding a third connector requires no code changes outside that one function.
+2. **A wire-format adapter, not a hardcoded assumption of one shape.** `app.connectors.client` translates between RateGuard's own target-agnostic `ConnectorQuoteRequest`/`ConnectorQuoteResponse` contract and whatever wire shape a specific target expects, keyed by that connector's declared `wire_format`. Two are implemented today, proving the pattern generalizes rather than being coupled to one bundled demo:
+   - **`rateguard_native_v1`** (`rating-engine-demo` connector) — a flat, snake_case `POST /quote` contract (`rating_engine.models.QuoteRequest`/`QuoteResponse`), with an optional `quote-batch-v1` capability for bulk portfolio scans.
+   - **`vendor_gateway_v1`** (`vendor-gateway-demo` connector) — a genuinely different, nested/camelCase contract (`POST /vendor/rate-quote`, `{"policyRequest": {"correlationId", "productCode", "engineVersion", "asOfDate", "ratingFactors", ...}}` in, `{"policyResponse": {...}}` out) modeled on how a policy-admin-system-style vendor quote API is commonly shaped. It rates through the *exact same* deterministic engine as the native connector — the point being proven is that the client adapts to a different wire shape, not that a second pricing implementation exists — and deliberately advertises no batch capability, so a mission against it always exercises the bounded-concurrent single-quote fallback path. `tests/connectors/test_vendor_gateway_wire_format.py` asserts both connectors return identical premiums for identical inputs. Both connectors point at the same bundled `backend/rating_engine` demo service today purely to avoid standing up a second Cloud Run service for this deployment's scope; a real third-party target only needs its own `base_url` and (if its shape differs from both above) one new adapter pair in `client.py`.
+3. **Static diff is correctly skipped, not faked.** When Source B is a live connector there's no source code to AST-diff, so `Material Findings` reports `NOT_RUN` rather than a fabricated result. In its place:
+   - **Boundary probes**: risk-directed test scenarios are executed against the connector and compared to the oracle's expected premium, per-probe.
+   - **Connector Impact**: a full portfolio-scale batched-quote run (`quote-batch-v1` when advertised, otherwise bounded concurrent single quotes) reports coverage/mismatch/exposure statistics — undercharge/overcharge split, a lower-bound flag when coverage is partial, and renewal-window impact at 30/60/90 days.
+   - **Cohort fairness screen**: mismatch rate broken out by `territory` and `construction_type`, with small-cohort suppression (n < 30) so a sparse cohort can't be singled out — explicitly labeled as a bias *screen*, not a legal finding of unfair discrimination.
+   - **Honest inconclusive handling**: a connector failure, timeout, or partial response is never silently absorbed into PASS or reported as a proven mismatch — it forces `REVIEW_REQUIRED` with an explicit "N of M probes were inconclusive; this is not evidence of a pricing defect" explanation (locked doc 7.4).
+4. **Known limitations, stated honestly, not quietly:**
+   - Both bundled connectors serve one product/jurisdiction (AZ HO3) and one underlying demo engine; a third-party target with a genuinely different product schema needs its own `IPIR → Connector Request Adapter` mapping — right now the connector's `inputs` dict is passed through as-is from whatever the compiled IPIR source declares, so a source whose input IDs don't match the target's expected field names will see every probe come back `CONNECTOR_FAILURE` (correctly reported as inconclusive, never as a false pass — but also not yet a proven pricing conclusion). Building that mapping layer out per-connector is the next investment here.
+   - The 50,000-policy "blast radius" headline figure is proven at full coverage only for the compiled-source (static IPIR) path. A connector-backed portfolio scan's exposure figure is coverage-qualified and marked as a lower bound whenever coverage is partial (see `imp.exposure_is_lower_bound` in `app.agents.supervisor`) — the UI and evidence bundle state the actual coverage percentage rather than implying full-portfolio confidence.
+
+## External API Access
+
+The core "validate via API" pitch needs an external, non-browser way to call RateGuard, not just a UI to click through. Every business route already requires a verified Firebase bearer token with a server-assigned role (see the Authentication bullet under Limitations below); on top of that, an optional **scoped, read-only demo API key** lets a judge's or insurer's own script or CI/CD pipeline call the API directly:
+
+```bash
+curl -H "X-RateGuard-Api-Key: $RATEGUARD_DEMO_API_KEY" \
+  https://rateguard-api-nwhotixfva-uc.a.run.app/api/v1/missions
+curl -H "X-RateGuard-Api-Key: $RATEGUARD_DEMO_API_KEY" \
+  https://rateguard-api-nwhotixfva-uc.a.run.app/api/v1/connectors
+```
+
+This is off by default (`Settings.demo_api_key` is unset, so no header is ever accepted as a credential unless explicitly configured) and, when enabled, always resolves to the read-only `VIEWER` role in a dedicated demo tenant — there is no way to obtain write access or a higher role through this path. Enabling it for a given deployment is a one-line `RATEGUARD_DEMO_API_KEY` environment variable set; whether to enable it for the live demo deployment is a founder call (see Limitations).
 
 ## Google Cloud Services
 
@@ -304,10 +361,10 @@ Prompt 8 additions to the honest limitations list: the connector-backed scan exc
 
 RateGuard is scoped to what it can verify end-to-end, not what would look impressive unverified:
 
-- **Source ingestion is JSON-only today.** Excel and PDF adapter code exists (`backend/app/adapters/`) but is not exposed through the API — extraction accuracy against real filings hasn't been proven, so uploads are rejected rather than silently approximated. YAML/CSV have no adapter at all.
+- **Source ingestion supports native IPIR JSON and the Controlled Workbook v1 `.xlsx` contract today.** Arbitrary/legacy Excel and PDF adapter code exists (`backend/app/adapters/`) but is not exposed through the API — extraction accuracy against real filings hasn't been proven, so uploads are rejected rather than silently approximated. YAML/CSV have no adapter at all.
 - **The 50,000-policy portfolio is synthetic**, generated for demo/testing purposes (`data/portfolio/`) — it is not real production policy data, and blast-radius dollar figures are illustrative of the methodology, not an actual carrier's exposure.
 - **Gemini's discretion is narrow by design.** It selects among deterministically-generated candidates at a handful of fixed pipeline stages; it never performs pricing arithmetic and can't be prompted into doing so. This is a deliberate scope boundary, not a current gap — see [The Deterministic Boundary](#the-deterministic-boundary).
-- **Single-tenant, single-region deployment.** No multi-tenant isolation, no authentication/authorization layer on the API beyond what Cloud Run's IAM provides at the infrastructure level — this is a hackathon-scope deployment, not a hardened multi-customer SaaS product.
+- **Single-tenant, single-region deployment.** The API *does* enforce authentication and role-based authorization on every business route: requests must carry a `Authorization: Bearer <Firebase ID token>`, which is verified server-side (Firebase Admin + ADC) and matched against a server-controlled user directory that assigns role (`ADMIN` / `RELEASE_OWNER` / `CONSUMER_REVIEWER` / `VIEWER`) and tenant — never taken from the token's custom claims, request body, or any other header. Unauthenticated or unrecognized-user requests fail closed with `401`/`403` (see `backend/app/auth/dependencies.py` and `docs/security/AUTHORIZATION_MATRIX.md`). An optional scoped, read-only demo API key (off by default) now exists for external scripts — see [External API Access](#external-api-access) — and `/docs`/`/openapi.json` are intentionally left open for hackathon-demo transparency. What's still missing for production: multi-tenant data isolation beyond the directory's `tenant_id` field — this is a hackathon-scope deployment, not a hardened multi-customer SaaS product.
 - **Portfolio exposure calculations run against one synthetic Arizona HO3 dataset.** Other lines of business (auto, commercial) can compile and compare via IPIR, but the bundled 50K-policy blast-radius dataset is specific to this one product/jurisdiction; a different line's portfolio scan needs its own dataset wired in.
 
 ## License

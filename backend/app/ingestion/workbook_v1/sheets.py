@@ -46,9 +46,18 @@ def load_workbook_safely(content: bytes) -> Workbook:
             io.BytesIO(content), data_only=False, read_only=False, keep_vba=False
         )
     except Exception as exc:  # noqa: BLE001 - any openpyxl failure is a hard rejection
+        # User-facing message stays free of raw exception class names/internal
+        # archive-member paths (e.g. "BadZipFile: Bad CRC-32 for file
+        # 'xl/theme/theme1.xml'"); the technical detail is preserved in
+        # `details[].note` for support/debugging, not the headline message.
         raise WorkbookRejectionError(
             code="CORRUPT_ARCHIVE",
-            message=f"Workbook could not be parsed: {type(exc).__name__}: {exc}",
+            message=(
+                "This file isn't a valid Excel workbook -- it may be corrupted, "
+                "in an unsupported format, or damaged in transit. Try re-saving "
+                "it from Excel and uploading again."
+            ),
+            details=[WorkbookErrorDetail(note=f"{type(exc).__name__}: {exc}")],
         ) from exc
 
 

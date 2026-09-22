@@ -1,5 +1,7 @@
 """Connector registry tests: fail-closed selection, safe metadata exposure
-(locked doc section 13.2), and the real one-entry demo registry."""
+(locked doc section 13.2), and the real two-entry demo registry (proving the
+registry generalizes beyond a single hardcoded connector -- see
+app/connectors/registry.py's `_build_registry` docstring)."""
 
 import pytest
 
@@ -21,11 +23,14 @@ def _reset_registry():
     reset_registry_cache()
 
 
-def test_real_registry_has_exactly_one_demo_connector():
+def test_real_registry_has_two_demo_connectors_with_different_wire_formats():
     registry = get_registry()
-    assert set(registry) == {"rating-engine-demo"}
-    entry = registry["rating-engine-demo"]
-    assert set(entry.allowed_engine_versions) == {"canonical-v1", "defective-v1"}
+    assert set(registry) == {"rating-engine-demo", "vendor-gateway-demo"}
+    for connector_id in ("rating-engine-demo", "vendor-gateway-demo"):
+        entry = registry[connector_id]
+        assert set(entry.allowed_engine_versions) == {"canonical-v1", "defective-v1"}
+    assert registry["rating-engine-demo"].wire_format == "rateguard_native_v1"
+    assert registry["vendor-gateway-demo"].wire_format == "vendor_gateway_v1"
 
 
 def test_select_connector_succeeds_for_registered_id_and_version():
@@ -56,10 +61,13 @@ def test_select_connector_never_falls_back_to_a_default():
 
 def test_metadata_never_exposes_base_url_or_credentials():
     metadata = list_connectors_metadata()
-    assert len(metadata) == 1
-    dumped = metadata[0].model_dump()
-    assert "base_url" not in dumped
-    assert "auth_header_name" not in dumped
-    assert "auth_token_env_var" not in dumped
-    assert dumped["connector_id"] == "rating-engine-demo"
-    assert set(dumped["allowed_engine_versions"]) == {"canonical-v1", "defective-v1"}
+    assert len(metadata) == 2
+    by_id = {m.connector_id: m.model_dump() for m in metadata}
+    assert set(by_id) == {"rating-engine-demo", "vendor-gateway-demo"}
+    for dumped in by_id.values():
+        assert "base_url" not in dumped
+        assert "auth_header_name" not in dumped
+        assert "auth_token_env_var" not in dumped
+        assert set(dumped["allowed_engine_versions"]) == {"canonical-v1", "defective-v1"}
+    assert by_id["rating-engine-demo"]["wire_format"] == "rateguard_native_v1"
+    assert by_id["vendor-gateway-demo"]["wire_format"] == "vendor_gateway_v1"

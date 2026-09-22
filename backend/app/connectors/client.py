@@ -152,10 +152,10 @@ class ConnectorClient:
         a mission/user-supplied URL — `entry` always originates from the
         fixed registry or a test fixture, never request input."""
         correlation_id = correlation_id or str(uuid.uuid4())
-        target_payload = self._to_target_payload(request, correlation_id)
+        path, target_payload = self._to_target_payload(entry.wire_format, request, correlation_id)
         return await self._execute(
-            entry, "POST", "/quote", target_payload, correlation_id, budget,
-            lambda body: self._parse_response(body, request, correlation_id),
+            entry, "POST", path, target_payload, correlation_id, budget,
+            lambda body: self._parse_response(entry.wire_format, body, request, correlation_id),
         )
 
     async def _execute(
@@ -225,7 +225,17 @@ class ConnectorClient:
     ) -> int:
         """Returns the connector's advertised `quote-batch-v1` item limit, or 0
         when it does not (or cannot verifiably) advertise the capability. Any
-        failure means "single-quote only" - the mission never depends on it."""
+        failure means "single-quote only" - the mission never depends on it.
+
+        Only checked for the `rateguard_native_v1` wire format: the batch
+        contract (`ConnectorBatchRequest`/`Response`) is that wire format's
+        own, and no other registered `wire_format` has declared an
+        equivalent batch contract yet -- a differently-shaped connector is
+        always driven with the bounded-concurrent single-quote path until it
+        does (see `app.connectors.client` module docstring's adapter-pair
+        pattern)."""
+        if entry.wire_format != "rateguard_native_v1":
+            return 0
         correlation_id = correlation_id or str(uuid.uuid4())
         try:
             caps = await self._execute(
@@ -291,22 +301,31 @@ class ConnectorClient:
         return response
 
     # -- payload translation -------------------------------------------------
+    #
+    # Each `wire_format` gets its own request-builder/response-parser pair
+    # (the "IPIR -> Connector Request Adapter" the connector-registration
+    # docs describe) so a new differently-shaped target only needs a new
+    # pair registered here plus a registry entry -- never a change to
+    # `ConnectorQuoteRequest`/`ConnectorQuoteResponse` (this connector's own,
+    # target-agnostic contract) or to any mission/impact-pipeline code above
+    # this client.
 
-    def _to_target_payload(self, request: ConnectorQuoteRequest, correlation_id: str) -> dict[str, Any]:
-        if request.jurisdiction is not None:
-            # Jurisdiction is never silently dropped: it is recorded here in
-            # the connector's own log line (for evidence/traceability) even
-            # though the current demo target's wire contract has no
-            # jurisdiction field and would reject an unknown one
-            # (`extra="forbid"` on `rating_engine.models.QuoteRequest`).
-            logger.info(
-                "connector_jurisdiction_recorded correlation_id=%s jurisdiction=%s "
-                "(carried in the connector's own contract for evidence; not "
-                "forwarded to this target's wire payload)",
-                correlation_id,
-                request.jurisdiction,
-            )
-        return {
+    def _to_target_payload(
+        self, wire_format: str, request: ConnectorQuoteRequest, correlation_id: str
+    ) -> tuple[str, dict[str, Any]]:
+        self._log_jurisdiction_if_present(request, correlation_id)
+        if wire_format == "vendor_gateway_v1":
+            return "/vendor/rate-quote", {
+                "policyRequest": {
+                    "correlationId": request.request_id,
+                    "productCode": request.product,
+                    "engineVersion": request.engine_version,
+                    "asOfDate": request.effective_date.isoformat(),
+                    "transactionType": request.transaction_type.value,
+                    "ratingFactors": request.inputs,
+                }
+            }
+        return "/quote", {
             "request_id": request.request_id,
             "engine_version": request.engine_version,
             "product_id": request.product,
@@ -315,6 +334,22 @@ class ConnectorClient:
             "inputs": request.inputs,
             "trace_requested": request.trace_requested,
         }
+
+    def _log_jurisdiction_if_present(self, request: ConnectorQuoteRequest, correlation_id: str) -> None:
+        if request.jurisdiction is not None:
+            # Jurisdiction is never silently dropped: it is recorded here in
+            # the connector's own log line (for evidence/traceability) even
+            # though no registered target's wire contract has a jurisdiction
+            # field today and would reject an unknown one (`extra="forbid"`
+            # on both `rating_engine.models.QuoteRequest` and
+            # `VendorPolicyRequest`).
+            logger.info(
+                "connector_jurisdiction_recorded correlation_id=%s jurisdiction=%s "
+                "(carried in the connector's own contract for evidence; not "
+                "forwarded to this target's wire payload)",
+                correlation_id,
+                request.jurisdiction,
+            )
 
     # -- HTTP transport --------------------------------------------------------
 
@@ -458,8 +493,35 @@ class ConnectorClient:
 
     # -- response parsing --------------------------------------------------------
 
+    def _normalize_raw_response(
+        self, wire_format: str, raw: dict[str, Any], correlation_id: str
+    ) -> dict[str, Any]:
+        """Reshapes a target's raw wire response into the flat field names
+        `ConnectorQuoteResponse` expects, before the shared validation below
+        (request-id/engine-version echo check, decimal-string output check,
+        strict schema) ever runs -- the second half of the wire_format
+        adapter pair (see `_to_target_payload`)."""
+        if wire_format != "vendor_gateway_v1":
+            return raw
+        policy = raw.get("policyResponse")
+        if not isinstance(policy, dict):
+            raise ConnectorException(
+                code="CONNECTOR_MALFORMED_JSON",
+                message="Vendor gateway response was missing a 'policyResponse' object.",
+                category=ConnectorFailureCategory.NON_RETRYABLE,
+                correlation_id=correlation_id,
+            )
+        return {
+            "request_id": policy.get("correlationId"),
+            "engine_version": policy.get("engineVersion"),
+            "outputs": policy.get("premiumComponents"),
+            "trace": [],
+            "rated_at": policy.get("quotedAt"),
+        }
+
     def _parse_response(
         self,
+        wire_format: str,
         body: bytes,
         request: ConnectorQuoteRequest,
         correlation_id: str,
@@ -481,6 +543,8 @@ class ConnectorClient:
                 category=ConnectorFailureCategory.NON_RETRYABLE,
                 correlation_id=correlation_id,
             )
+
+        raw = self._normalize_raw_response(wire_format, raw, correlation_id)
 
         # Explicit pre-check: a response `outputs` value that is a JSON
         # number (not a JSON string) is rejected here, before Pydantic ever

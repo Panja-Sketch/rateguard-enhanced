@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 from collections import Counter
 from collections.abc import Callable
@@ -70,6 +71,18 @@ class _Row:
     candidate: str | None = None
     code: str | None = None
     transient: bool = False
+
+
+# Extracts only the leading "Input '<id>'" (or "'<id>' references"/"unknown
+# table '<id>'") portion of an oracle error message -- enough to diagnose
+# *which* field or node is systematically failing across a portfolio scan,
+# without ever logging the specific policy value that triggered it.
+_FIELD_HINT_PATTERN = re.compile(r"^(.*?'[A-Za-z0-9_]+')")
+
+
+def _safe_error_hint(exc: Exception) -> str:
+    match = _FIELD_HINT_PATTERN.match(str(exc))
+    return match.group(1) if match else ""
 
 
 def _norm(value: str | None) -> str:
@@ -192,7 +205,10 @@ class BatchProcessor:
                     rows.append(_Row(idx, "INCONCLUSIVE", code=exc.code))
                 continue
             except Exception as exc:  # noqa: BLE001 - never leak input values
-                logger.warning("IMPACT_LOCAL_CALC_ERROR error_type=%s", type(exc).__name__)
+                logger.warning(
+                    "IMPACT_LOCAL_CALC_ERROR error_type=%s hint=%s",
+                    type(exc).__name__, _safe_error_hint(exc),
+                )
                 rows.append(_Row(idx, "INCONCLUSIVE", code="LOCAL_CALCULATION_ERROR"))
                 continue
             pending.append((idx, inputs, calc.calculation_date, policy.transaction_type.value, calc.final_premium))

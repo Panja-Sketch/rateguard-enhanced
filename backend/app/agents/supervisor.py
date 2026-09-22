@@ -2140,7 +2140,12 @@ class AssuranceSupervisor:
 
         if blocking_reasons:
             decision_status = "BLOCK_DEPLOYMENT"
-            summary_msg = f"Deployment blocked due to {len(blocking_reasons)} critical pricing drift findings."
+            # Cite the actual reasons rather than len(blocking_reasons) as a single
+            # "N critical pricing drift findings" count: blocking_reasons mixes
+            # heterogeneous signals (semantic diffs, connector mismatches, missing
+            # stages, etc.) whose own counts are not interchangeable with each
+            # other or with the number of reasons in the list.
+            summary_msg = "Deployment blocked: " + " ".join(blocking_reasons)
             rec_msg = "Apply proposed rating engine remediation patch and re-run assurance verification before releasing."
         elif review_required:
             # Every other signal agrees, but compilation uncertainty and/or a

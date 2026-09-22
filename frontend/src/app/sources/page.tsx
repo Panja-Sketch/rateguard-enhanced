@@ -389,6 +389,48 @@ export default function SourcesPage() {
           enabled files, external links, OLE objects, password-protected workbooks, and unsupported formulas are
           rejected with the exact sheet/cell/function location, not silently ignored.
         </p>
+        <div className="flex flex-wrap items-center gap-3 pt-1">
+          <a
+            href="/samples/rateguard-workbook-sample.xlsx"
+            download
+            className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-800 bg-emerald-950/40 px-3 py-1.5 text-xs font-bold text-emerald-300 hover:bg-emerald-950"
+          >
+            <Download className="h-3.5 w-3.5" /> Download sample workbook
+          </a>
+          <a
+            href="/samples/rateguard-workbook-sample-b-drift.xlsx"
+            download
+            className="inline-flex items-center gap-1.5 rounded-lg border border-purple-800 bg-purple-950/40 px-3 py-1.5 text-xs font-bold text-purple-300 hover:bg-purple-950"
+          >
+            <Download className="h-3.5 w-3.5" /> Download one-factor drift pair
+          </a>
+        </div>
+        <p className="text-xs text-slate-400 leading-relaxed">
+          Upload the sample workbook as Source A and the drift-pair workbook as Source B to see the same
+          roof-age-factor drift demonstrated in the JSON template pair, driven entirely from <code>.xlsx</code>.
+        </p>
+        <div className="rounded-lg border border-slate-800 bg-slate-950 p-3 text-xs text-slate-400 space-y-1.5">
+          <div className="flex items-center gap-1.5 font-bold text-slate-300 font-sans">
+            <Info className="h-3.5 w-3.5 text-emerald-400" /> What this file must contain
+          </div>
+          <p className="leading-relaxed">
+            Seven required sheets, each with fixed column headers: <code className="text-emerald-300">RG_METADATA</code>{' '}
+            (key/value: <code className="text-emerald-300">package_id</code>, <code className="text-emerald-300">product_id</code>,{' '}
+            <code className="text-emerald-300">line</code>, <code className="text-emerald-300">country</code>,{' '}
+            <code className="text-emerald-300">currency</code>, <code className="text-emerald-300">effective_start</code>),{' '}
+            <code className="text-emerald-300">RG_INPUTS</code>, <code className="text-emerald-300">RG_CONSTANTS</code>,{' '}
+            <code className="text-emerald-300">RG_TABLES</code> (range or exact-match lookup rows),{' '}
+            <code className="text-emerald-300">RG_CALCULATIONS</code> (mini-DSL operators:{' '}
+            <code className="text-emerald-300">ADD SUBTRACT MULTIPLY DIVIDE MIN MAX ROUND LOOKUP IF</code>, never a
+            live Excel formula), <code className="text-emerald-300">RG_OUTPUTS</code> (each must resolve to a{' '}
+            <code className="text-emerald-300">ROUND</code> calculation node), and{' '}
+            <code className="text-emerald-300">RG_CONTROL_CASES</code> (golden input/output examples — at least one
+            passing case is required for a <code className="text-emerald-300">VERIFIED</code> compilation, not just a
+            structurally valid one). Only <code className="text-emerald-300">USD</code>/<code className="text-emerald-300">US-AZ</code> are
+            in scope for this deployment today. See the full contract and worked example in the{' '}
+            <a href="https://github.com/Panja-Sketch/rateguard-ai#supported-source-format-controlled-workbook-v1-xlsx" target="_blank" rel="noreferrer" className="underline text-emerald-300">README</a>.
+          </p>
+        </div>
         <div className="rounded-lg border border-rose-900/60 bg-rose-950/20 p-3 text-xs text-rose-200 flex items-start gap-2">
           <AlertCircle className="h-3.5 w-3.5 shrink-0 mt-0.5" />
           <span>
@@ -502,10 +544,17 @@ export default function SourcesPage() {
                 {connectors.length === 0 && <option value="">No connectors registered</option>}
                 {connectors.map((c) => (
                   <option key={c.connector_id} value={c.connector_id}>
-                    {c.display_name}
+                    {c.display_name} ({c.wire_format})
                   </option>
                 ))}
               </select>
+              {selectedConnector && (
+                <p className="text-[11px] text-slate-500">
+                  Wire contract: <span className="font-mono text-slate-400">{selectedConnector.wire_format}</span>
+                  {selectedConnector.wire_format === 'vendor_gateway_v1' &&
+                    ' — a nested, camelCase request/response envelope, not RateGuard’s own contract, proving the connector client adapts to a genuinely different vendor shape.'}
+                </p>
+              )}
               <label className="block text-[11px] font-bold text-slate-400">Engine version</label>
               <select
                 value={engineVersion}

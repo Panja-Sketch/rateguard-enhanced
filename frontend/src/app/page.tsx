@@ -52,7 +52,7 @@ export default function HomePage() {
           </div>
           <h3 className="text-base font-bold text-white">Vendor-Neutral Intermediate Representation</h3>
           <p className="text-xs text-slate-400 leading-relaxed">
-            Compiles supported native IPIR and structured rating-config JSON sources into a canonical Intermediate Pricing Implementation Representation (IPIR) for symmetric comparison. Excel and PDF extraction is planned, not yet supported.
+            Compiles supported native IPIR and structured rating-config JSON sources — plus a documented RateGuard Controlled Workbook v1 (.xlsx) contract — into a canonical Intermediate Pricing Implementation Representation (IPIR) for symmetric comparison. Arbitrary/legacy Excel and PDF extraction is out of scope by design: RateGuard will not claim a compilation it can&apos;t verifiably stand behind.
           </p>
         </div>
 

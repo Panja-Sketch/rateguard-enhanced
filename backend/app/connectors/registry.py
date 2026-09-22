@@ -56,6 +56,15 @@ class ConnectorRegistryEntry(BaseModel):
     auth_token_env_var: str | None = None
     # "none" | "google_id_token" (see Settings.rating_engine_connector_auth_mode).
     auth_mode: str = "none"
+    # Which wire shape `app.connectors.client` speaks to this target's
+    # single-quote endpoint (batch/capabilities are always the RateGuard-
+    # native shape today; no registered target advertises a differently-
+    # shaped batch contract yet). "rateguard_native_v1" is this repo's own
+    # flat `rating_engine.models.QuoteRequest`/`QuoteResponse` contract;
+    # "vendor_gateway_v1" is a genuinely different, nested/camelCase demo
+    # contract (`rating_engine.vendor_gateway`) proving the client adapts to
+    # more than one shape, not just its own contract under a new name.
+    wire_format: str = "rateguard_native_v1"
 
     def host_and_port(self) -> tuple[str, int]:
         parts = urlsplit(self.base_url)
@@ -76,6 +85,7 @@ class ConnectorMetadata(BaseModel):
     connector_id: str
     display_name: str
     allowed_engine_versions: tuple[str, ...]
+    wire_format: str
     last_health_check_status: str | None = None
 
 
@@ -110,6 +120,18 @@ class UnknownEngineVersionError(ConnectorException):
 
 
 def _build_registry() -> dict[str, ConnectorRegistryEntry]:
+    """Builds the fixed, administrator-configured connector list. Two demo
+    entries are registered today, deliberately proving the registry
+    generalizes beyond a single hardcoded connector: `rating-engine-demo`
+    (this repo's own flat wire contract) and `vendor-gateway-demo` (a
+    genuinely differently-shaped nested/camelCase contract modeled on a
+    policy-admin-system-style vendor quote API — see
+    `rating_engine.vendor_gateway`). Both currently point at the same
+    `backend/rating_engine` service (its `/quote*` vs `/vendor/rate-quote`
+    routes) purely to avoid standing up a second Cloud Run service for a
+    hackathon-scope demo; a real second vendor target only requires adding
+    another entry here with its own `base_url` and `wire_format` -- no
+    other code changes -- which is the point being demonstrated."""
     settings = get_settings()
     demo_entry = ConnectorRegistryEntry(
         connector_id="rating-engine-demo",
@@ -120,8 +142,20 @@ def _build_registry() -> dict[str, ConnectorRegistryEntry]:
         auth_header_name=settings.rating_engine_connector_auth_header_name,
         auth_token_env_var=settings.rating_engine_connector_auth_token_env_var,
         auth_mode=settings.rating_engine_connector_auth_mode,
+        wire_format="rateguard_native_v1",
     )
-    return {demo_entry.connector_id: demo_entry}
+    vendor_gateway_entry = ConnectorRegistryEntry(
+        connector_id="vendor-gateway-demo",
+        display_name="Vendor Gateway Demo (policy-admin-style API)",
+        base_url=settings.vendor_gateway_connector_base_url or settings.rating_engine_connector_base_url,
+        allowed_engine_versions=("canonical-v1", "defective-v1"),
+        is_local_dev=settings.rating_engine_connector_is_local_dev,
+        auth_header_name=settings.rating_engine_connector_auth_header_name,
+        auth_token_env_var=settings.rating_engine_connector_auth_token_env_var,
+        auth_mode=settings.rating_engine_connector_auth_mode,
+        wire_format="vendor_gateway_v1",
+    )
+    return {entry.connector_id: entry for entry in (demo_entry, vendor_gateway_entry)}
 
 
 _REGISTRY_CACHE: dict[str, ConnectorRegistryEntry] | None = None
@@ -165,6 +199,7 @@ def list_connectors_metadata() -> list[ConnectorMetadata]:
             connector_id=entry.connector_id,
             display_name=entry.display_name,
             allowed_engine_versions=entry.allowed_engine_versions,
+            wire_format=entry.wire_format,
         )
         for entry in get_registry().values()
     ]

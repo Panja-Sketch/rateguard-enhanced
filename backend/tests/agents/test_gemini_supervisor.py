@@ -168,6 +168,20 @@ def test_valid_decision_applied_no_false_model_id_and_budget_respected():
     assert res.release_decision.data.status == "BLOCK_DEPLOYMENT"
 
 
+def test_block_deployment_headline_cites_real_reasons_not_fabricated_count():
+    """The release-decision headline must never synthesize a single "N
+    critical pricing drift findings" count from len(blocking_reasons) --
+    that list mixes heterogeneous signals (semantic diffs, mismatch counts,
+    missing stages, ...) whose counts are not interchangeable. It must
+    instead cite the actual reason text, so every number shown is real."""
+    fake = FakeGeminiClient()
+    res = _run_defective(fake, mission_id="MIS-GEM-HEADLINE")
+    decision = res.release_decision.data
+    assert decision.status == "BLOCK_DEPLOYMENT"
+    assert decision.summary == "Deployment blocked: " + " ".join(decision.blocking_reasons)
+    assert "critical pricing drift findings" not in decision.summary
+
+
 def test_unknown_tool_is_rejected_by_registry():
     assert is_known_tool("compare_ipir")
     assert is_known_tool("query_portfolio")

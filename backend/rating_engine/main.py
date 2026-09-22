@@ -27,8 +27,11 @@ from rating_engine.models import (
     BatchQuoteResponse,
     QuoteRequest,
     QuoteResponse,
+    VendorGatewayQuoteRequest,
+    VendorGatewayQuoteResponse,
 )
 from rating_engine.startup_selftest import run_startup_selftest
+from rating_engine.vendor_gateway import handle_vendor_quote
 
 logger = logging.getLogger(__name__)
 
@@ -88,6 +91,25 @@ def quote(request: QuoteRequest) -> QuoteResponse:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Injected transient fault.")
     try:
         return execute_quote(request)
+    except UnknownEngineVersionError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    except QuoteExecutionError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+    except ValidationError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+
+
+@app.post("/vendor/rate-quote", response_model=VendorGatewayQuoteResponse)
+def vendor_rate_quote(request: VendorGatewayQuoteRequest) -> VendorGatewayQuoteResponse:
+    """The second, deliberately differently-shaped demo connector target
+    (see `rating_engine.vendor_gateway`) -- a nested, camelCase envelope
+    proving RateGuard's connector client adapts to a genuinely different
+    wire contract, not just its own contract under a new name."""
+    policy = request.policyRequest
+    if fault_injection.should_fail(policy.asOfDate, policy.ratingFactors):
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Injected transient fault.")
+    try:
+        return handle_vendor_quote(request)
     except UnknownEngineVersionError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     except QuoteExecutionError as exc:

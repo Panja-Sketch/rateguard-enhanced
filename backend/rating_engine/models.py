@@ -107,3 +107,46 @@ class BatchQuoteResponse(BaseModel):
     results: list[BatchQuoteItemResult]
     rated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     engine_revision: str | None = None
+
+
+# -- second, deliberately differently-shaped wire contract ("vendor gateway")
+# --------------------------------------------------------------------------
+# Proves the connector client's translation layer is a genuine adapter, not
+# just RateGuard's own contract with a different name: same underlying
+# deterministic engine (`rating_engine.engines.quote_service.execute_quote`),
+# wrapped in a nested, differently-field-named request/response envelope
+# modeled on how a policy-admin-system-style vendor quote API is commonly
+# shaped (a single top-level wrapper object, camelCase field names, a nested
+# "as of" date and rating-factor map). See `rating_engine.vendor_gateway`.
+
+
+class VendorPolicyRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    correlationId: str
+    productCode: str
+    engineVersion: str
+    asOfDate: date
+    transactionType: TransactionType
+    ratingFactors: dict[str, Any]
+
+
+class VendorGatewayQuoteRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    policyRequest: VendorPolicyRequest
+
+
+class VendorPolicyResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    correlationId: str
+    engineVersion: str
+    premiumComponents: dict[str, str]
+    quotedAt: datetime = Field(default_factory=lambda: datetime.now(UTC))
+
+
+class VendorGatewayQuoteResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    policyResponse: VendorPolicyResponse

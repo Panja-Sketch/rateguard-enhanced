@@ -94,11 +94,15 @@ class IPIRPackageV2(BaseModel):
     transaction_types: list[TransactionType] = Field(
         default_factory=lambda: [TransactionType.NEW_BUSINESS, TransactionType.RENEWAL]
     )
-    inputs: list[PricingInput] = Field(default_factory=list)
-    constants: list[PricingConstant] = Field(default_factory=list)
-    tables: list[RateTable] = Field(default_factory=list)
-    calculations: list[CalculationNodeV2] = Field(default_factory=list)
-    outputs: list[PricingOutputV2] = Field(default_factory=list)
+    # Required top-level fields (mirrors v0.1's IPIRPackage contract, see
+    # app.ipir.package): presence is enforced via `Field(...)`, and
+    # calculations/outputs must be non-empty since a package with neither has
+    # nothing to price.
+    inputs: list[PricingInput] = Field(...)
+    constants: list[PricingConstant] = Field(...)
+    tables: list[RateTable] = Field(...)
+    calculations: list[CalculationNodeV2] = Field(...)
+    outputs: list[PricingOutputV2] = Field(...)
     control_cases: list[ControlCase] = Field(default_factory=list)
     attestation: Attestation | None = None
 
@@ -107,6 +111,17 @@ class IPIRPackageV2(BaseModel):
         if not SCHEMA_VERSION_PATTERN.match(self.schema_version):
             raise ValueError(f"schema_version must match '0.2.x', got '{self.schema_version}'.")
         self.package_id = validate_identifier_string_v2(self.package_id)
+
+        if not self.calculations:
+            raise ValueError(
+                "IPIRPackageV2 'calculations' must contain at least one node: a "
+                "package with zero calculations defines no pricing logic to price."
+            )
+        if not self.outputs:
+            raise ValueError(
+                "IPIRPackageV2 'outputs' must contain at least one node: a package "
+                "with zero outputs defines no outputs to compare or price."
+            )
 
         # 1. Strict v0.2 ID pattern + duplicate-ID validation across the
         # package namespace. Leaf types are reused from v0.1 (which enforce

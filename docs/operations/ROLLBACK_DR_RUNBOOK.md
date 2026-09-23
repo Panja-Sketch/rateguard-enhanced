@@ -6,7 +6,7 @@
   (digest form). Previous production revisions before Prompt 8: worker `rateguard-worker-00003-96v`, api
   `rateguard-api-00004-hwh`, rating engine `rateguard-rating-engine-00003-bn5`, web `rateguard-web-00003-tbr`.
 * Traffic rollback: `gcloud run services update-traffic <service> --region us-central1 --to-revisions <PREV>=100`
-  (all four services; `infrastructure/deploy_release.sh rollback`). Revisions are never deleted.
+  (all four services; `infrastructure/rollback.sh --rollback ...`). Revisions are never deleted.
 * **Data compatibility:** the new release only *adds* the `impact_jobs` collection. Old revisions ignore it. Old
   missions/evidence stay readable by new and old revisions (doubled `CONNECTOR_CONNECTOR_` codes are normalised on read).
 * **Pub/Sub:** if the worker is rolled back while `impact-batches` messages are in flight, the old worker has no
@@ -21,7 +21,7 @@
 
 | Asset | Recovery |
 |---|---|
-| Cloud Run services | redeploy by digest from Artifact Registry (`deploy_release.sh`), images are immutable |
+| Cloud Run services | redeploy by digest from Artifact Registry (`deploy_candidate_enhanced.sh` + `promote_candidate_to_production.sh`), images are immutable |
 | Firestore (runs, evidence, `impact_jobs`) | managed export/PITR (enable point-in-time recovery for production); `impact_jobs` batches are reconstructible by re-running the mission |
 | GCS artifacts (sources, evidence bundles) | bucket versioning + `gsutil`/`gcloud storage` restore of tenant-prefixed objects |
 | Pub/Sub | recreate with `infrastructure/setup_impact_pubsub.sh`; DLQ subscription retains undelivered messages |

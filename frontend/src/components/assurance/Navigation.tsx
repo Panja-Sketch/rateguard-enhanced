@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { ShieldCheck, Cpu, FileCode2, History, Network, RefreshCw, LogOut } from 'lucide-react';
+import { ShieldCheck, Cpu, FileCode2, History, Network, RefreshCw, LogOut, Scale } from 'lucide-react';
 import { useCallback, useEffect, useState } from 'react';
 import { fetchHealth } from '@/lib/api/client';
 import { useAuth } from '@/lib/auth/AuthProvider';
@@ -39,6 +39,7 @@ export function Navigation() {
     ...(authors ? [{ href: '/sources', label: 'Sources', icon: FileCode2 }] : []),
     { href: '/missions', label: 'Mission History', icon: History },
     { href: '/architecture', label: 'Architecture', icon: Network },
+    { href: '/positioning', label: 'Positioning', icon: Scale },
   ];
 
   return (

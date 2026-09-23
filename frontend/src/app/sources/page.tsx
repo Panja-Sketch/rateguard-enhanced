@@ -330,8 +330,11 @@ export default function SourcesPage() {
         </div>
         <p className="text-xs text-slate-400 leading-relaxed">
           The canonical IPIR 0.1 schema, parsed directly from your uploaded JSON — every table, rule, and
-          output in the file you upload is what RateGuard actually compiles. A platform rating-config JSON
-          export (e.g. Guidewire/Duck Creek-style wrapper) is also auto-detected and compiled deterministically.
+          output in the file you upload is what RateGuard actually compiles. RateGuard does not have a built,
+          tested adapter for any specific rating-platform export format (Guidewire, Duck Creek, or otherwise)
+          today; a platform&apos;s pricing logic can be verified once it is expressed as IPIR JSON, or once the
+          platform is reachable through the vendor-neutral REST connector contract described on the{' '}
+          <a href="/architecture" className="text-sky-300 underline hover:text-sky-200">architecture page</a>.
         </p>
         <div className="flex flex-wrap items-center gap-3 pt-1">
           <a

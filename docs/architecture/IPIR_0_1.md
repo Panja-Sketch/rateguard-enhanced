@@ -3,14 +3,14 @@
 ## 1. Overview & Purpose
 **IPIR (Insurance Pricing Intermediate Representation)** is a canonical, executable, vendor-neutral, and source-agnostic Abstract Syntax Tree (AST) schema for insurance pricing logic.
 
-Insurance pricing specifications move across disparate media and vendor runtimes (regulatory filings, actuarial spreadsheets, Guidewire, Duck Creek, Earnix, custom REST rating APIs, production engines). IPIR acts as RateGuard's universal core abstraction, isolating rate intent and pricing semantics from implementation technologies.
+Insurance pricing specifications move across disparate media and vendor runtimes (regulatory filings, actuarial spreadsheets, Guidewire, Duck Creek, Earnix, custom REST rating APIs, production engines). IPIR acts as RateGuard's universal core abstraction, isolating rate intent and pricing semantics from implementation technologies. IPIR itself is vendor-neutral by design; today RateGuard compiles IPIR only from the two supported source contracts (native IPIR JSON and the RateGuard Controlled Workbook v1) and reaches a candidate implementation only via the supported REST rating-engine connector contract — it does not extract IPIR directly from a Guidewire, Duck Creek, or other named-platform proprietary export.
 
 ---
 
 ## 2. Core Design Principles
 
-1. **Vendor-Neutral & Source-Agnostic:** IPIR models pricing concepts (rate tables, conditions, expressions, modifiers, rounding) without hardcoding vendor-specific constructs (such as Guidewire Gosu, Duck Creek XML, or Excel cell references). Vendor metadata is kept strictly in provenance attributes.
-2. **Bidirectional Semantic Comparison:** IPIR is designed to allow any pricing representation $IPIR_A$ to be compared against any other representation $IPIR_B$ (e.g., Regulatory Filing ↔ Actuarial Workbook, Actuarial Workbook ↔ Guidewire Configuration).
+1. **Vendor-Neutral & Source-Agnostic:** IPIR models pricing concepts (rate tables, conditions, expressions, modifiers, rounding) without hardcoding vendor-specific constructs (such as Guidewire Gosu, Duck Creek XML, or Excel cell references). Vendor metadata is kept strictly in provenance attributes. This describes the representation's design goal, not a claim that RateGuard has built extraction from any of those named vendor formats today.
+2. **Bidirectional Semantic Comparison:** IPIR is designed to allow any two compiled IPIR packages to be compared against each other regardless of which supported source contract produced them (native IPIR JSON or a compiled Controlled Workbook v1), or against a candidate engine's responses reached through the REST connector contract.
 3. **Deterministic Math & Decimal Precision:** Authoritative pricing values, money, factors, percentages, and constants strictly use arbitrary-precision Python `Decimal` data types. Binary floating-point representation (`float`) is prohibited to eliminate rounding drift.
 4. **Deterministic Execution Philosophy:** Gemini (via the Google GenAI SDK) assists in prioritizing differences and explaining findings, but **never** executes authoritative premium arithmetic. IPIR is evaluated solely by deterministic software engines.
 5. **Auditable Lineage & Provenance:** Every rate factor, rule, and calculation node retains metadata linking back to source filings, pages, sections, or database versions with explicit confidence metrics.

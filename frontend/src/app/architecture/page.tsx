@@ -115,6 +115,29 @@ export default function ArchitecturePage() {
         </p>
       </div>
 
+      {/* Vendor-Neutral Connector Contract */}
+      <div className="rounded-2xl border border-emerald-800/60 bg-emerald-950/20 p-6 space-y-3">
+        <h2 className="text-base font-bold text-white uppercase tracking-wider flex items-center gap-2">
+          <ShieldCheck className="h-4 w-4 text-emerald-400" /> Vendor-Neutral by Connector Contract
+        </h2>
+        <p className="text-xs sm:text-sm text-emerald-100 leading-relaxed">
+          RateGuard reaches a candidate rating implementation through one versioned, authenticated REST connector
+          contract — a fixed request/response schema, administrator-allowlisted destinations, SSRF and timeout
+          controls, and no per-mission free-text URLs. Any REST target that implements this contract can be
+          registered and verified, which is what makes RateGuard vendor-neutral: it is compatible with any rating
+          engine that implements the connector contract, including an engine fronting Guidewire, Duck Creek, or a
+          legacy platform.
+        </p>
+        <p className="text-xs sm:text-sm text-amber-200 leading-relaxed border-t border-emerald-900/60 pt-3">
+          RateGuard has not built or tested a named-vendor adapter for Guidewire, Duck Creek, AS400, or any other
+          specific platform. Today the only connector target registered and proven end-to-end is the isolated demo
+          rating engine (<code className="font-mono text-white">canonical-v1</code> /
+          <code className="font-mono text-white"> defective-v1</code>). A rating platform participates once its
+          pricing logic is exposed behind a REST endpoint that speaks the connector contract — that integration
+          work is not built today, and RateGuard does not claim otherwise.
+        </p>
+      </div>
+
       {/* Tech Stack Cards */}
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
         {techStack.map((tech, idx) => {

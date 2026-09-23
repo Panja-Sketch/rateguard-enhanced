@@ -9,7 +9,7 @@ Unlike text-based code diffs or schema diffs, the Semantic Diff Engine operates 
 
 ## 2. Core Architectural Principles
 
-1. **Vendor & Source Neutrality:** Operates exclusively on IPIR AST models. Works identically for Filings, Actuarial Workbooks, Guidewire implementations, Duck Creek rate plans, or custom rating engines.
+1. **Vendor & Source Neutrality:** Operates exclusively on IPIR AST models, so it compares any two sources that have been compiled into IPIR identically regardless of where they originated — a supported IPIR JSON export, a compiled Controlled Workbook, or a candidate engine reached through the REST connector contract. RateGuard does not have a built adapter that extracts IPIR directly from Guidewire, Duck Creek, or another named platform's proprietary export today; such a platform participates only once its pricing logic is expressed as IPIR JSON or exposed behind the connector contract.
 2. **Bidirectional Symmetry:** Comparing `A → B` vs `B → A` identifies the same underlying semantic differences while swapping left/right values and reversing `MISSING_NODE` ↔ `EXTRA_NODE` semantics.
 3. **Exact Decimal Comparison:** Numerical pricing values (factors, base rates, minimums, fees) are compared using exact Python `Decimal` values.
 4. **Granular Semantic Pathing:** Pinpoints exact changed dimension cells (e.g. `tables.roof_age_factor[21..30]`) rather than reporting entire table replacements.

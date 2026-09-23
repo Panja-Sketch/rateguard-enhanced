@@ -4,11 +4,30 @@ RateGuard AI is a vendor-neutral, agentic insurance pricing assurance platform. 
 
 **Production URL:** https://rateguard-web-iqofutwtva-uc.a.run.app
 
----
+## Positioning: RateGuard Complements Your Rating Platform, It Does Not Replace It
+
+> PricingCenter is where insurers author and configure rates. RateGuard is an independent assurance layer that
+> verifies whether the deployed implementation matches the approved actuarial intent. RateGuard complements
+> Guidewire, Duck Creek, legacy platforms, and custom rating engines; it does not replace them.
+
+| Capability | Rating platform (e.g. PricingCenter) | RateGuard |
+| :--- | :--- | :--- |
+| Rate authoring & configuration | Yes — its core function | No |
+| Deployed-engine verification | Not its function | Yes |
+| Approved-intent comparison | Not applicable | Yes — against an independently held approved spec |
+| Cross-engine / multi-vendor support | Single platform | Any REST target implementing RateGuard's connector contract |
+| Portfolio customer-impact quantification | Not its function | Yes — bounded synthetic 50,000-policy portfolio |
+| Tamper-evident evidence bundle | Not its function | Yes — SHA-256 hashed bundle with a manifest |
+| Independent release decision | Not its function | Yes — PASS / BLOCK_DEPLOYMENT / REVIEW_REQUIRED |
+
+**Who gets the most value:** insurers running multiple rating engines, migrating between engines, changing rates
+frequently, handing pricing logic across separate teams, or carrying meaningful market-conduct exposure. A carrier
+on a single, deeply trusted engine with infrequent rate changes may reasonably see RateGuard as optional. See the
+[`/positioning`](frontend/src/app/positioning/page.tsx) page in the deployed app for the full framework.
 
 ## The Problem
 
-Insurance pricing logic is written once (as an approved actuarial filing) and then re-implemented multiple times: in rating engines (Guidewire, Duck Creek, Earnix, custom REST APIs), in spreadsheets, in legacy systems. A rule that is 100% correct at its source can be silently mistranslated during implementation:
+Insurance pricing logic is written once (as an approved actuarial filing) and then re-implemented multiple times: in rating engines (Guidewire, Duck Creek, Earnix, custom REST APIs), in spreadsheets, in legacy systems. A rule that is correct at its source can be silently mistranslated during implementation:
 
 - **Approved filing:** `roof_age >= 21 → factor 1.35`
 - **Implemented engine:** `roof_age >= 21 → factor 1.25`
@@ -17,9 +36,9 @@ The code runs cleanly, throws no exceptions, and passes ordinary smoke tests —
 
 ## The Innovation
 
-RateGuard converts a pricing source — a native IPIR/structured JSON spec, or a platform rating-config JSON export — into a canonical **Insurance Pricing Intermediate Representation (IPIR)**: an executable AST and dependency graph. Because every source lands in the same representation, RateGuard can compare *any* two of them symmetrically, without treating any vendor or format as the privileged source of truth. Upload a RateGuard-supported source template; the compiler validates the schema and fails closed when required pricing elements cannot be verified — RateGuard does not claim to analyze an arbitrary spreadsheet or filing PDF, only what it can genuinely and verifiably compile (see [Supported Source Formats](#supported-source-formats)).
+RateGuard converts a supported pricing source — native IPIR/structured JSON, or the RateGuard Controlled Workbook v1 contract — into a canonical **Insurance Pricing Intermediate Representation (IPIR)**: an executable AST and dependency graph. Because every source lands in the same representation, RateGuard can compare *any* two of them symmetrically, without treating any vendor or format as the privileged source of truth. Upload a RateGuard-supported source template; the compiler validates the schema and fails closed when required pricing elements cannot be verified — RateGuard does not claim to analyze an arbitrary spreadsheet or filing PDF, only what it can genuinely and verifiably compile (see [Supported Source Formats](#supported-source-formats)).
 
-From there, a bounded, structured Gemini supervisor and a suite of deterministic engines work together to not just detect that two sources differ, but to prove *how much it matters*: which calculation nodes are affected, which of 50,000 real policies would be mispriced, and by how much money — then propose and verify a fix.
+From there, a bounded, structured Gemini supervisor and a suite of deterministic engines work together to not just detect that two sources differ, but to prove *how much it matters*: which calculation nodes are affected, which of 50,000 synthetic policies in the demo portfolio would be mispriced, and by how much money — then propose and verify a fix.
 
 ## Agentic Gemini Workflow
 
@@ -296,6 +315,15 @@ A pricing-assurance tool that reports a false `PASS` is worse than one that repo
 - **Behavioral evidence overrides a clean AST diff.** If the boundary-testing probes compute different premiums for Source A and Source B, that blocks the release (`BLOCK_DEPLOYMENT`) even when the semantic differ reports zero structural differences — the AST comparison catching nothing does not mean nothing changed.
 - **Low-confidence extraction forces human review.** Any source compiled below `LOW_CONFIDENCE_REVIEW_THRESHOLD` never silently supports a `PASS` — the mission is downgraded to `REVIEW_REQUIRED`, even if every other signal agrees.
 - **Product or jurisdiction mismatches are surfaced, not compared away.** Comparing a Homeowners source against a Personal Auto source, or two different states, isn't a meaningful equivalence check. RateGuard detects the metadata mismatch from the compiled packages and returns `REVIEW_REQUIRED` with the specific reason, instead of quietly running a comparison that was never apples-to-apples.
+
+## What RateGuard Does Not Do
+
+- Does not accept arbitrary Excel workbooks, macros, PDFs, filings, or an arbitrary codebase — only the exact RateGuard Controlled Workbook v1 contract and strict IPIR JSON.
+- Does not have a built, tested adapter for Guidewire, Duck Creek, AS400, or any other named rating platform — only the vendor-neutral REST connector contract, which such a platform could sit behind once wired up.
+- Does not make a legal fairness or discrimination determination. Its impact-distribution screening looks for uneven outcomes across configured synthetic cohorts; it is not a legal finding and does not replace actuarial, compliance, or legal review.
+- Does not integrate with live production renewal or billing systems. All portfolio and pipeline impact analysis runs against a synthetic, de-identified, seeded dataset, always disclosed as synthetic.
+- Does not automatically send policyholder correspondence — only draft explanations for authorized human review and approval.
+- Does not claim "100% accurate," "regulator approved," or "legally compliant" results, and does not claim a cryptographic hash chain — its evidence bundle is SHA-256 hashed with a manifest, not hash-chained.
 
 ## Limitations
 

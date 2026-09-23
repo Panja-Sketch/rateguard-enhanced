@@ -2,7 +2,7 @@
 
 ## 1. Overview & Vision
 
-RateGuard AI's deployed pricing-assurance pipeline (`AssuranceSupervisor.run_mission`, `backend/app/agents/supervisor.py`) is a single deterministic Python pipeline that calls Gemini (via the **Google GenAI SDK**, configured via `RATEGUARD_GEMINI_MODEL`, defaulting to `gemini-3.7-flash`) at a fixed set of bounded decision points. This is **not** Google ADK and **not** a multi-agent framework — there is one supervisor, no inter-agent message passing, and every Gemini call returns a strict Pydantic-validated structured response (see `backend/app/agents/decision_schemas.py`) that is checked before anything downstream acts on it.
+RateGuard AI's deployed pricing-assurance pipeline (`AssuranceSupervisor.run_mission`, `backend/app/agents/supervisor.py`) is a single deterministic Python pipeline that calls Gemini (via the **Google GenAI SDK**, configured via `RATEGUARD_GEMINI_MODEL`, defaulting to `gemini-3.1-flash-lite`) at a fixed set of bounded decision points. This is **not** Google ADK and **not** a multi-agent framework — there is one supervisor, no inter-agent message passing, and every Gemini call returns a strict Pydantic-validated structured response (see `backend/app/agents/decision_schemas.py`) that is checked before anything downstream acts on it.
 
 ---
 

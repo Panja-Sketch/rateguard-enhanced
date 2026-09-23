@@ -23,6 +23,7 @@ from collections.abc import Callable
 from functools import lru_cache
 
 from fastapi import Depends, Request
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from app.auth.directory import UserDirectory, build_user_directory
 from app.auth.errors import auth_unavailable, forbidden, unauthorized
@@ -39,6 +40,14 @@ logger = logging.getLogger(__name__)
 
 MAX_TOKEN_LENGTH = 8192
 _BEARER_RE = re.compile(r"^Bearer ([A-Za-z0-9._~+/=-]+)$")
+
+# Registered purely so FastAPI's generated OpenAPI schema declares an HTTP
+# Bearer security scheme on every authenticated route and /docs renders a
+# functional "Authorize" control. `auto_error=False` means this dependency
+# never itself rejects a request -- actual token extraction/verification is
+# still done by `_extract_bearer_token`/`get_current_user` below, unchanged.
+# This is documentation-only wiring, not a second auth path.
+bearer_scheme = HTTPBearer(auto_error=False, description="Firebase ID token (Authorization: Bearer <token>)")
 
 
 @lru_cache
@@ -86,9 +95,16 @@ def _demo_api_key_user(request: Request) -> AuthenticatedUser | None:
 
 def get_current_user(
     request: Request,
+    _credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
     verifier: TokenVerifier = Depends(get_token_verifier),
     directory: UserDirectory = Depends(get_user_directory),
 ) -> AuthenticatedUser:
+    # `_credentials` is intentionally unused: it exists only to make FastAPI
+    # register the Bearer security scheme in OpenAPI (see `bearer_scheme`
+    # above). The real header parsing/validation is `_extract_bearer_token`
+    # below, which is stricter than HTTPBearer's own parsing and must remain
+    # the actual source of truth so existing malformed-header behavior is
+    # unchanged.
     demo_user = _demo_api_key_user(request)
     if demo_user is not None:
         return demo_user

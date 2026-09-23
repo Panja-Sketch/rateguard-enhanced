@@ -3,11 +3,18 @@ import './globals.css';
 import { Navigation } from '@/components/assurance/Navigation';
 import { AuthGate } from '@/components/auth/AuthGate';
 import { AuthProvider } from '@/lib/auth/AuthProvider';
+import { runtimeConfigScriptContents } from '@/lib/runtimeConfig';
 
 export const metadata: Metadata = {
   title: 'RateGuard AI — Continuous Pricing Assurance for Insurance',
   description: 'Independent agentic pricing assurance, semantic diff, and portfolio risk analysis for insurance carriers.',
 };
+
+// The API base URL must be resolved from the RATEGUARD_API_URL server env
+// var on every request (see lib/runtimeConfig.ts), not baked in at build
+// time — force-dynamic disables static prerendering of this layout so that
+// read never gets frozen into a build-time snapshot.
+export const dynamic = 'force-dynamic';
 
 export default function RootLayout({
   children,
@@ -16,6 +23,13 @@ export default function RootLayout({
 }) {
   return (
     <html lang="en" className="dark">
+      <head>
+        <script
+          id="rateguard-runtime-config"
+          // eslint-disable-next-line react/no-danger
+          dangerouslySetInnerHTML={{ __html: runtimeConfigScriptContents() }}
+        />
+      </head>
       <body className="flex min-h-screen flex-col bg-slate-950 text-slate-100 antialiased">
         <AuthProvider>
           <Navigation />

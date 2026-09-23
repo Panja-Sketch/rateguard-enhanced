@@ -78,15 +78,34 @@ OBSOLETE_STAGING_NAMES="assurance-runs-staging assurance-worker-staging assuranc
 
 # Consumed by promote_candidate_to_production.sh's require_verified_marker --
 # a file named after the full git SHA existing here is what "this candidate
-# passed --verify-candidate" means to the promotion script.
+# passed --verify-candidate" means to the promotion script. Alongside it,
+# record_verified() writes "${GIT_SHA}.evidence" (structured: verified image
+# digests + candidate revision names + mission id) which promotion uses to
+# pin and cross-check that it is promoting the EXACT digests that were
+# actually verified, not whatever happens to be under the movable
+# `candidate` tag at promotion time. Neither file is deleted by cleanup --
+# audit evidence must survive ephemeral-resource cleanup.
 VERIFIED_MARKER_DIR="infrastructure/.candidate-verified"
 
-# A single disposable, uniquely-named Pub/Sub subscription used only by
-# `--verify-candidate` (see verify_candidate_async_path below). It is created
-# on the EXISTING PRODUCTION TOPIC (never a new topic) and always deleted
-# again in the same run, success or failure -- the real
-# assurance-runs-worker-sub subscription is never modified.
-VERIFY_SUBSCRIPTION_PREFIX="assurance-runs-candidate-verify"
+# A SHA-scoped, fully ISOLATED verification topic+subscription used only by
+# `--verify-candidate` (see verify_candidate_async_path below) -- NEVER a
+# subscription on the real production topic. An earlier version of this
+# script created a disposable *subscription* on the EXISTING PRODUCTION
+# TOPIC (assurance-runs); because Pub/Sub fan-out delivers one copy of every
+# message to EVERY subscription on a topic, that meant the real
+# assurance-runs-worker-sub subscription (i.e. the PRODUCTION worker) also
+# received every candidate verification message, racing the candidate
+# worker to process it and proving nothing about which one actually did.
+# The candidate API's own RATEGUARD_PUBSUB_TOPIC env var is retargeted at
+# this topic for the duration of verification (see verify_candidate_async_path)
+# so a verification mission is never published to the production topic at
+# all -- not merely delivered to an extra subscription on it.
+VERIFY_TOPIC_PREFIX="assurance-runs-candidate-verify"
+VERIFY_SUBSCRIPTION_SUFFIX="-sub"
+# The synthetic tenant/idempotency-key prefix verification missions use --
+# never a real customer tenant, always grep-able in Firestore/logs as
+# obviously synthetic.
+VERIFY_TENANT="candidate-verify-tenant"
 
 GIT_SHA="$(git rev-parse HEAD 2>/dev/null || echo '')"
 if [ -z "$GIT_SHA" ]; then
@@ -96,15 +115,22 @@ fi
 IMAGE_TAG="candidate-${GIT_SHA}"
 
 RATING_ENGINE_IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${ARTIFACT_REPO}/rateguard-rating-engine:${IMAGE_TAG}"
-WORKER_IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${ARTIFACT_REPO}/rateguard-worker:${IMAGE_TAG}"
-API_IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${ARTIFACT_REPO}/rateguard-api:${IMAGE_TAG}"
 WEB_IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${ARTIFACT_REPO}/rateguard-web:${IMAGE_TAG}"
 
 # api and worker are the same deployable package (locked doc section 12.1:
 # "Worker: Same Python package/image as API with separate command"), so they
-# MUST be deployed from the exact same image digest -- see
-# assert_api_worker_same_digest below, run right after both are deployed.
-BACKEND_IMAGE="$API_IMAGE"
+# MUST be deployed from the exact same image digest. There is deliberately no
+# separate WORKER_IMAGE variable -- a prior version of this script declared
+# one (pointed at a DIFFERENT Artifact Registry repository path,
+# rateguard-worker instead of rateguard-api) and the printed plan quoted it
+# for the worker deploy command while the real deploy_candidate() function
+# below always used BACKEND_IMAGE for both, so the plan and reality silently
+# diverged. BACKEND_IMAGE is now the ONLY image reference either the plan
+# text or the real gcloud calls may use for api/worker -- see
+# assert_api_worker_same_digest below, run right after both are deployed, and
+# test_enhanced_deploy_api_and_worker_share_one_backend_image_variable /
+# test_enhanced_deploy_plan_worker_and_api_reference_the_same_image_variable.
+BACKEND_IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${ARTIFACT_REPO}/rateguard-api:${IMAGE_TAG}"
 
 CANDIDATE_ENV_FILE_API="infrastructure/.candidate-enhanced-env-api.yaml"
 CANDIDATE_ENV_FILE_WORKER="infrastructure/.candidate-enhanced-env-worker.yaml"
@@ -257,8 +283,10 @@ Exact commands --deploy-candidate would run, in order:
        --memory=512Mi
 
   3) Deploy worker candidate (PRIVATE -- Pub/Sub push only, OIDC-authenticated),
-     wired at the PRODUCTION Firestore/GCS/BigQuery names above:
-     gcloud run deploy rateguard-worker --image ${WORKER_IMAGE} \\
+     wired at the PRODUCTION Firestore/GCS/BigQuery names above -- from the
+     SAME image as API (BACKEND_IMAGE), never a separate rateguard-worker
+     repository image:
+     gcloud run deploy rateguard-worker --image ${BACKEND_IMAGE} \\
        --region ${REGION} --no-traffic --tag ${CANDIDATE_TAG} \\
        --no-allow-unauthenticated --service-account ${WORKER_SA} \\
        --memory=1Gi --env-vars-file=${CANDIDATE_ENV_FILE_WORKER}   # RATEGUARD_SERVICE_ROLE=worker
@@ -276,8 +304,9 @@ Exact commands --deploy-candidate would run, in order:
        # (API calls the connector directly for the admin-only connector-test route)
 
   4) Deploy API candidate (public, verifies Firebase ID tokens), wired at the
-     same production Firestore/GCS/BigQuery names:
-     gcloud run deploy rateguard-api --image ${API_IMAGE} \\
+     same production Firestore/GCS/BigQuery names -- from the SAME image as
+     worker (BACKEND_IMAGE):
+     gcloud run deploy rateguard-api --image ${BACKEND_IMAGE} \\
        --region ${REGION} --no-traffic --tag ${CANDIDATE_TAG} \\
        --allow-unauthenticated --service-account ${API_SA} \\
        --memory=512Mi --env-vars-file=${CANDIDATE_ENV_FILE_API}   # RATEGUARD_SERVICE_ROLE=api
@@ -286,14 +315,26 @@ Exact commands --deploy-candidate would run, in order:
       same image digest (both come from ${BACKEND_IMAGE}) -- refuses to
       continue otherwise.
 
-  5) Build and deploy web candidate (API URL and the PUBLIC Firebase web config
-     baked in at build time; refuses to build if any NEXT_PUBLIC_FIREBASE_*
-     value is missing):
+  5) Build and deploy web candidate. The API URL is deployment-time RUNTIME
+     config (RATEGUARD_API_URL, a plain Cloud Run env var, never baked into
+     the image) so this SAME image digest can later be promoted unchanged --
+     see BLOCKER 3/4 in promote_candidate_to_production.sh. Only the PUBLIC
+     Firebase web config (not a secret) is baked in at build time; refuses
+     to build if any NEXT_PUBLIC_FIREBASE_* value is missing:
      gcloud builds submit ./frontend --config=./frontend/cloudbuild.yaml \\
-       --substitutions=_IMAGE_TAG=${IMAGE_TAG},_NEXT_PUBLIC_RATEGUARD_API_URL=<candidate-api-tagged-url>,_NEXT_PUBLIC_FIREBASE_*=...
+       --substitutions=_IMAGE_TAG=${IMAGE_TAG},_NEXT_PUBLIC_FIREBASE_*=...
      gcloud run deploy rateguard-web --image ${WEB_IMAGE} \\
        --region ${REGION} --no-traffic --tag ${CANDIDATE_TAG} \\
-       --allow-unauthenticated --service-account ${WEB_SA}
+       --allow-unauthenticated --service-account ${WEB_SA} \\
+       --update-env-vars RATEGUARD_API_URL=<candidate-api-tagged-url>
+
+  OIDC audience note: the candidate-tagged worker/rating-engine URLs above
+  are valid PUSH ENDPOINTS (they route to the specific candidate revision),
+  but Cloud Run's proven-working OIDC audience form (see
+  infrastructure/setup_impact_pubsub.sh, the live impact-batches
+  subscription) is always the service's STABLE, untagged base URL --
+  never a --tag URL. --verify-candidate below uses the stable worker URL
+  as the push-auth-token-audience for exactly this reason.
 
   5b) Point the API CORS allowlist at the candidate web origin (exactly one
       explicit origin, no wildcard), still --no-traffic.
@@ -304,24 +345,52 @@ Exact commands --deploy-candidate would run, in order:
      on worker or rating-engine.
 
 --verify-candidate (run separately, after --deploy-candidate, against an
-already-deployed candidate) would:
-  1) Record the real ${PROD_PUBSUB_SUBSCRIPTION} push config as the "before"
-     state (never modified).
-  2) Create a disposable subscription named
-     ${VERIFY_SUBSCRIPTION_PREFIX}-<short-sha> on the EXISTING production
-     topic ${PROD_PUBSUB_TOPIC}, push-configured at the candidate-tagged
-     worker URL, OIDC audience = that same candidate URL.
-  3) Create a mission through the candidate-tagged API using a synthetic,
-     clearly-marked verification tenant, with a fixed idempotency key, and
-     poll it to a terminal state (never treats 202/QUEUED as success).
-  4) Publish the identical idempotency key a second time and confirm exactly
-     one terminal mission/decision exists (duplicate-delivery / idempotency
-     check).
-  5) Delete the disposable subscription unconditionally (success or
-     failure path) and confirm ${PROD_PUBSUB_SUBSCRIPTION}'s push config is
-     byte-for-byte unchanged from the "before" state captured in step 1. If
-     that confirmation fails, this exits non-zero with the exact manual
-     cleanup command rather than continuing silently.
+already-deployed candidate) would -- CANDIDATE RESOURCES / CLEANUP PLAN:
+  1) Record the real ${PROD_PUBSUB_SUBSCRIPTION} state as the "before" state
+     (never modified) and the candidate worker's revision name (the
+     acceptance-evidence baseline every later check is compared against).
+  2) Create an ISOLATED, SHA-scoped verification topic
+     ${VERIFY_TOPIC_PREFIX}-<short-sha> and subscription
+     <that-topic>${VERIFY_SUBSCRIPTION_SUFFIX} -- NEVER a subscription on the
+     shared production topic ${PROD_PUBSUB_TOPIC} (Pub/Sub fan-out would also
+     deliver every verification message to the real production worker and
+     race it -- this is the fix for the fan-out defect this replaces).
+     Push endpoint: the candidate-tagged worker URL (routes to this specific
+     candidate revision). OIDC audience: the STABLE, untagged worker URL --
+     the proven-working form (see infrastructure/setup_impact_pubsub.sh),
+     never the --tag URL.
+  3) Retarget the candidate API's (still --no-traffic, --tag ${CANDIDATE_TAG}
+     only) RATEGUARD_PUBSUB_TOPIC at the isolated verification topic, so a
+     verification mission is never published to production's
+     ${PROD_PUBSUB_TOPIC} at all -- not merely delivered to an extra
+     subscription on it.
+  4) Create a mission through the candidate-tagged API using the synthetic,
+     clearly-marked tenant '${VERIFY_TENANT}', with a fixed idempotency key,
+     and poll it to a terminal state (never treats 202/QUEUED as success).
+     Proof the CANDIDATE worker (not production) processed it: the
+     downloaded evidence bundle's deployment.json.cloud_run_revision must
+     equal the candidate worker revision recorded in step 1 (and differ from
+     the current production worker revision), and its git_sha must equal
+     the full SHA being verified.
+  5) Publish the identical idempotency key a second time (into the isolated
+     topic, still never production) and confirm exactly one terminal
+     mission/decision exists (duplicate-delivery / idempotency check).
+  6) Unconditionally (success or failure path): restore the candidate API's
+     RATEGUARD_PUBSUB_TOPIC to ${PROD_PUBSUB_TOPIC}, delete the ephemeral
+     verification topic+subscription, and confirm
+     ${PROD_PUBSUB_SUBSCRIPTION}'s state is byte-for-byte unchanged from the
+     "before" state captured in step 1. If that confirmation fails, this
+     exits non-zero with an explicit "treat production Pub/Sub as SUSPECT"
+     warning rather than continuing silently. This cleanup never deletes the
+     acceptance evidence itself (Firestore/GCS mission data, or the verified
+     marker/evidence file --record-verified writes), only the ephemeral
+     Pub/Sub resources created in step 2.
+
+--record-verified (run only after the checks in step 4/5 above are manually
+confirmed) resolves and pins the VERIFIED DIGESTS of all four
+candidate-tagged revisions into infrastructure/.candidate-verified/<sha>.evidence
+-- this is what lets promote_candidate_to_production.sh refuse to promote if
+the \`candidate\` tag has since moved to a different, unverified deployment.
 
 NOT done by this script, ever:
   - No production traffic change ('gcloud run services update-traffic').
@@ -333,6 +402,10 @@ NOT done by this script, ever:
   - No staging Pub/Sub topic/subscription/Firestore collection/BigQuery
     dataset/GCS bucket creation.
   - No modification of the real ${PROD_PUBSUB_SUBSCRIPTION} push config.
+  - No subscription ever created on the shared production topic
+    ${PROD_PUBSUB_TOPIC} -- verification uses its own isolated, SHA-scoped
+    topic, so no candidate-verification message can ever reach the real
+    production worker via Pub/Sub fan-out.
   - No deploy to, or read/write of, the old 'rateguard-ai' project.
 
 Re-run this plan any time with no arguments (read-only). Pass
@@ -351,6 +424,7 @@ write_candidate_env_file() {
   cat > "$out" <<ENV
 RATEGUARD_SERVICE_ROLE: "${role}"
 RATEGUARD_ENVIRONMENT: "candidate"
+RATEGUARD_GIT_SHA: "${GIT_SHA}"
 RATEGUARD_AGENT_ENABLED: "true"
 RATEGUARD_MAX_GEMINI_CALLS_PER_MISSION: "10"
 RATEGUARD_MAX_PROBE_ROUNDS: "3"
@@ -509,9 +583,9 @@ deploy_candidate() {
     --no-allow-unauthenticated --service-account "$WORKER_SA" \
     --memory=1Gi --env-vars-file="$CANDIDATE_ENV_FILE_WORKER"
 
-  echo "   Wiring candidate rating-engine connector URL into worker..."
+  echo "   Wiring candidate rating-engine connector URL + image digest (deployment provenance) into worker..."
   gcloud run services update rateguard-worker --region "$REGION" --no-traffic --tag "$CANDIDATE_TAG" \
-    --update-env-vars "RATEGUARD_RATING_ENGINE_CONNECTOR_BASE_URL=${RATING_ENGINE_TAGGED_URL},RATEGUARD_RATING_ENGINE_CONNECTOR_IS_LOCAL_DEV=false,RATEGUARD_RATING_ENGINE_CONNECTOR_AUTH_MODE=google_id_token,RATEGUARD_VENDOR_GATEWAY_CONNECTOR_BASE_URL=${RATING_ENGINE_TAGGED_URL}"
+    --update-env-vars "RATEGUARD_RATING_ENGINE_CONNECTOR_BASE_URL=${RATING_ENGINE_TAGGED_URL},RATEGUARD_RATING_ENGINE_CONNECTOR_IS_LOCAL_DEV=false,RATEGUARD_RATING_ENGINE_CONNECTOR_AUTH_MODE=google_id_token,RATEGUARD_VENDOR_GATEWAY_CONNECTOR_BASE_URL=${RATING_ENGINE_TAGGED_URL},RATEGUARD_IMAGE_DIGEST=${BACKEND_DIGEST}"
 
   WORKER_TAGGED_URL=$(get_tagged_url rateguard-worker)
   WORKER_UNTAGGED_URL=$(get_untagged_url rateguard-worker)
@@ -543,9 +617,9 @@ deploy_candidate() {
     --allow-unauthenticated --service-account "$API_SA" \
     --memory=512Mi --env-vars-file="$CANDIDATE_ENV_FILE_API"
 
-  echo "   Wiring candidate rating-engine connector URL into API..."
+  echo "   Wiring candidate rating-engine connector URL + image digest (deployment provenance) into API..."
   gcloud run services update rateguard-api --region "$REGION" --no-traffic --tag "$CANDIDATE_TAG" \
-    --update-env-vars "RATEGUARD_RATING_ENGINE_CONNECTOR_BASE_URL=${RATING_ENGINE_TAGGED_URL},RATEGUARD_RATING_ENGINE_CONNECTOR_IS_LOCAL_DEV=false,RATEGUARD_RATING_ENGINE_CONNECTOR_AUTH_MODE=google_id_token,RATEGUARD_VENDOR_GATEWAY_CONNECTOR_BASE_URL=${RATING_ENGINE_TAGGED_URL}"
+    --update-env-vars "RATEGUARD_RATING_ENGINE_CONNECTOR_BASE_URL=${RATING_ENGINE_TAGGED_URL},RATEGUARD_RATING_ENGINE_CONNECTOR_IS_LOCAL_DEV=false,RATEGUARD_RATING_ENGINE_CONNECTOR_AUTH_MODE=google_id_token,RATEGUARD_VENDOR_GATEWAY_CONNECTOR_BASE_URL=${RATING_ENGINE_TAGGED_URL},RATEGUARD_IMAGE_DIGEST=${BACKEND_DIGEST}"
 
   API_TAGGED_URL=$(get_tagged_url rateguard-api)
   if [ -z "$API_TAGGED_URL" ]; then
@@ -558,14 +632,17 @@ deploy_candidate() {
   WORKER_REV="$(gcloud run services describe rateguard-worker --region "$REGION" --format="value(status.latestCreatedRevisionName)")"
   assert_api_worker_same_digest "$API_REV" "$WORKER_REV"
 
-  echo "5. Building and deploying candidate web..."
+  echo "5. Building and deploying candidate web (API URL is deployment-time"
+  echo "   runtime config, RATEGUARD_API_URL -- never baked into this image;"
+  echo "   see frontend/src/lib/runtimeConfig.ts)..."
   FIREBASE_SUBSTITUTIONS="$(build_firebase_substitutions)" || exit 1
   gcloud builds submit ./frontend --config=./frontend/cloudbuild.yaml \
-    --substitutions=_IMAGE_TAG="$IMAGE_TAG",_NEXT_PUBLIC_RATEGUARD_API_URL="$API_TAGGED_URL"${FIREBASE_SUBSTITUTIONS}
+    --substitutions=_IMAGE_TAG="$IMAGE_TAG"${FIREBASE_SUBSTITUTIONS}
   gcloud run deploy rateguard-web \
     --image "$WEB_IMAGE" --region "$REGION" --platform managed \
     --no-traffic --tag "$CANDIDATE_TAG" \
-    --allow-unauthenticated --service-account "$WEB_SA"
+    --allow-unauthenticated --service-account "$WEB_SA" \
+    --update-env-vars "RATEGUARD_API_URL=${API_TAGGED_URL}"
 
   WEB_TAGGED_URL=$(get_tagged_url rateguard-web || true)
   if [ -z "$WEB_TAGGED_URL" ]; then
@@ -602,92 +679,203 @@ deploy_candidate() {
   echo "========================================================"
 }
 
-# --- Candidate async-worker verification: uses a disposable subscription on
-# the EXISTING production topic, never modifies the real subscription, always
-# cleans up, and fails loudly (never silently) if cleanup does not verify. ---
+# --- Candidate async-worker verification: publishes ONLY to a SHA-scoped,
+# fully isolated ephemeral topic+subscription (never a subscription on the
+# shared production topic -- Pub/Sub fan-out would also deliver to the real
+# assurance-runs-worker-sub / production worker and race it), always cleans
+# up the ephemeral Pub/Sub resources, and fails loudly (never silently) if
+# cleanup does not verify. ---
+tagged_revision_name() {
+  # Args: <service>. The revision name currently under --tag candidate.
+  gcloud run services describe "$1" --region "$REGION" --format="value(status.traffic)" 2>/dev/null \
+    | tr ';' '\n' | grep "'tag': '${CANDIDATE_TAG}'" | sed -E "s/.*'revisionName': '([^']+)'.*/\1/"
+}
+
+prod_revision_name() {
+  # Args: <service>. The revision currently serving 100% of production traffic.
+  gcloud run services describe "$1" --region "$REGION" --format="value(status.traffic)" 2>/dev/null \
+    | tr ';' '\n' | grep "'percent': 100" | sed -E "s/.*'revisionName': '([^']+)'.*/\1/"
+}
+
 verify_candidate_async_path() {
   preflight_guards
 
   local short_sha="${GIT_SHA:0:12}"
-  local verify_sub="${VERIFY_SUBSCRIPTION_PREFIX}-${short_sha}"
+  local verify_topic="${VERIFY_TOPIC_PREFIX}-${short_sha}"
+  local verify_sub="${verify_topic}${VERIFY_SUBSCRIPTION_SUFFIX}"
   local worker_tagged_url worker_untagged_url api_tagged_url
+  local candidate_worker_rev prod_worker_rev
 
   worker_tagged_url="$(get_tagged_url rateguard-worker)"
   worker_untagged_url="$(get_untagged_url rateguard-worker)"
   api_tagged_url="$(get_tagged_url rateguard-api)"
-  if [ -z "$worker_tagged_url" ] || [ -z "$api_tagged_url" ]; then
+  if [ -z "$worker_tagged_url" ] || [ -z "$worker_untagged_url" ] || [ -z "$api_tagged_url" ]; then
     echo "Error: no candidate-tagged rateguard-worker/rateguard-api revision found." >&2
     echo "Run '$0 --deploy-candidate' first." >&2
     exit 1
   fi
 
-  echo "1. Recording the REAL ${PROD_PUBSUB_SUBSCRIPTION} push config (before state, never modified)..."
-  local before_state
-  before_state="$(gcloud pubsub subscriptions describe "$PROD_PUBSUB_SUBSCRIPTION" --format=json)"
-  echo "   Before: $(echo "$before_state" | grep -o '"pushEndpoint":[^,]*')"
-
-  echo "2. Creating disposable verification subscription ${verify_sub} on the EXISTING topic ${PROD_PUBSUB_TOPIC}..."
-  if gcloud pubsub subscriptions describe "$verify_sub" >/dev/null 2>&1; then
-    echo "Error: ${verify_sub} already exists from a prior, incompletely-cleaned-up run. Refusing to continue." >&2
-    echo "  Inspect and delete manually: gcloud pubsub subscriptions delete ${verify_sub}" >&2
+  # Recorded now, BEFORE any test traffic -- the acceptance-evidence baseline
+  # this verification must prove the mission actually ran on, never inferred
+  # after the fact from a --tag lookup made once the candidate has moved on.
+  candidate_worker_rev="$(tagged_revision_name rateguard-worker)"
+  prod_worker_rev="$(prod_revision_name rateguard-worker)"
+  if [ -z "$candidate_worker_rev" ] || [ "$candidate_worker_rev" = "$prod_worker_rev" ]; then
+    echo "Error: could not determine a distinct candidate worker revision (candidate=${candidate_worker_rev:-<none>}, production=${prod_worker_rev:-<none>})." >&2
     exit 1
   fi
+
+  echo "1. Recording the REAL ${PROD_PUBSUB_SUBSCRIPTION} state (must remain byte-for-byte"
+  echo "   unchanged throughout -- this script never creates a subscription on, or publishes"
+  echo "   to, the production topic ${PROD_PUBSUB_TOPIC})..."
+  local before_state
+  before_state="$(gcloud pubsub subscriptions describe "$PROD_PUBSUB_SUBSCRIPTION" --format=json)"
+
+  echo "2. Creating an ISOLATED, SHA-scoped verification topic ${verify_topic} +"
+  echo "   subscription ${verify_sub} (never the production topic -- Pub/Sub fan-out means a"
+  echo "   subscription on the shared production topic would ALSO deliver every verification"
+  echo "   message to the real assurance-runs-worker-sub / production worker and race it)..."
+  if gcloud pubsub topics describe "$verify_topic" >/dev/null 2>&1 || gcloud pubsub subscriptions describe "$verify_sub" >/dev/null 2>&1; then
+    echo "Error: ${verify_topic}/${verify_sub} already exist from a prior, incompletely-cleaned-up run." >&2
+    echo "  Inspect and delete manually: gcloud pubsub subscriptions delete ${verify_sub}; gcloud pubsub topics delete ${verify_topic}" >&2
+    exit 1
+  fi
+  gcloud pubsub topics create "$verify_topic" >/dev/null
+  gcloud pubsub topics add-iam-policy-binding "$verify_topic" \
+    --member="serviceAccount:${API_SA}" --role="roles/pubsub.publisher" >/dev/null
+  # Push endpoint is the candidate-tagged worker URL (routes specifically to
+  # THIS candidate revision), but the OIDC audience is the STABLE, untagged
+  # worker URL -- the form Cloud Run's push auth is actually proven to
+  # accept in this project (see infrastructure/setup_impact_pubsub.sh's
+  # live, working impact-batches subscription, which uses the same
+  # base-URL-as-audience pattern). A prior version of this script used the
+  # --tag URL itself as the audience, which was never validated against real
+  # Cloud Run push-auth behavior -- do not reintroduce that.
   gcloud pubsub subscriptions create "$verify_sub" \
-    --topic="$PROD_PUBSUB_TOPIC" \
+    --topic="$verify_topic" \
     --ack-deadline=600 \
     --push-endpoint="${worker_tagged_url}/internal/pubsub/assurance" \
     --push-auth-service-account="$WORKER_SA" \
-    --push-auth-token-audience="$worker_tagged_url"
+    --push-auth-token-audience="$worker_untagged_url"
 
-  cleanup_verify_sub() {
-    echo "5. Deleting disposable subscription ${verify_sub}..."
-    if ! gcloud pubsub subscriptions delete "$verify_sub" >/dev/null 2>&1; then
-      echo "Error: failed to delete ${verify_sub}. MANUAL CLEANUP REQUIRED:" >&2
-      echo "  gcloud pubsub subscriptions delete ${verify_sub}" >&2
-      exit 1
+  echo "3. Retargeting the candidate API's (still --no-traffic, --tag ${CANDIDATE_TAG} only)"
+  echo "   publish topic at ${verify_topic} -- this is what actually confines every"
+  echo "   verification message to the isolated topic instead of production's ${PROD_PUBSUB_TOPIC}..."
+  gcloud run services update rateguard-api --region "$REGION" --no-traffic --tag "$CANDIDATE_TAG" \
+    --update-env-vars "RATEGUARD_PUBSUB_TOPIC=${verify_topic}" >/dev/null
+  api_tagged_url="$(get_tagged_url rateguard-api)"
+
+  local cleanup_done=false
+  cleanup_verify_resources() {
+    [ "$cleanup_done" = true ] && return
+    cleanup_done=true
+    echo "6. Restoring the candidate API's publish topic to ${PROD_PUBSUB_TOPIC}..."
+    if ! gcloud run services update rateguard-api --region "$REGION" --no-traffic --tag "$CANDIDATE_TAG" \
+      --update-env-vars "RATEGUARD_PUBSUB_TOPIC=${PROD_PUBSUB_TOPIC}" >/dev/null 2>&1; then
+      echo "Error: failed to restore candidate API's RATEGUARD_PUBSUB_TOPIC to ${PROD_PUBSUB_TOPIC}. MANUAL FIX REQUIRED." >&2
     fi
-    echo "   Confirming the REAL ${PROD_PUBSUB_SUBSCRIPTION} push config is unchanged..."
+    echo "   Deleting ephemeral verification subscription ${verify_sub} and topic ${verify_topic}"
+    echo "   (never the acceptance evidence itself -- that lives in Firestore/GCS/the verified-"
+    echo "   marker directory, not in these ephemeral Pub/Sub resources)..."
+    if ! gcloud pubsub subscriptions delete "$verify_sub" >/dev/null 2>&1; then
+      echo "Error: failed to delete ${verify_sub}. MANUAL CLEANUP REQUIRED: gcloud pubsub subscriptions delete ${verify_sub}" >&2
+    fi
+    if ! gcloud pubsub topics delete "$verify_topic" >/dev/null 2>&1; then
+      echo "Error: failed to delete ${verify_topic}. MANUAL CLEANUP REQUIRED: gcloud pubsub topics delete ${verify_topic}" >&2
+    fi
+    echo "   Confirming the REAL ${PROD_PUBSUB_SUBSCRIPTION} is byte-for-byte unchanged..."
     local after_state
     after_state="$(gcloud pubsub subscriptions describe "$PROD_PUBSUB_SUBSCRIPTION" --format=json)"
     if [ "$before_state" != "$after_state" ]; then
-      echo "Error: ${PROD_PUBSUB_SUBSCRIPTION} changed during verification. This should be" >&2
-      echo "impossible (this script never issues a 'modify-push-config' against it) -- treat" >&2
-      echo "production Pub/Sub routing as SUSPECT and investigate before promoting anything." >&2
+      echo "Error: ${PROD_PUBSUB_SUBSCRIPTION} changed during verification. Treat production" >&2
+      echo "Pub/Sub routing as SUSPECT and investigate before promoting anything." >&2
       exit 1
     fi
-    echo "   Confirmed: ${PROD_PUBSUB_SUBSCRIPTION} is byte-for-byte unchanged."
+    echo "   Confirmed: ${PROD_PUBSUB_SUBSCRIPTION} is unchanged -- no candidate message could"
+    echo "   ever have reached it (verification published only to ${verify_topic})."
   }
-  trap cleanup_verify_sub EXIT
+  trap cleanup_verify_resources EXIT
 
-  echo "3. Creating a mission through the candidate API with a synthetic verification tenant..."
-  echo "   (Fixed idempotency key so step 4 can prove duplicate delivery does not double-process.)"
+  local idem_key="candidate-verify-${short_sha}"
+  echo "4. Creating a mission through the candidate API with the synthetic tenant '${VERIFY_TENANT}'..."
   echo "   Manual/CI step: POST ${api_tagged_url}/api/v1/missions with"
-  echo "   X-Idempotency-Key: candidate-verify-${short_sha}"
-  echo "   tenant_id: candidate-verify-tenant (synthetic, never a real customer tenant)"
+  echo "   X-Idempotency-Key: ${idem_key}"
+  echo "   tenant_id: ${VERIFY_TENANT} (synthetic, never a real customer tenant)"
   echo "   Poll GET ${api_tagged_url}/api/v1/missions/<id> until a TERMINAL status"
   echo "   (COMPLETED/FAILED/REVIEW_REQUIRED) -- a 202/QUEUED response is NOT acceptance evidence."
+  echo "   PROOF the CANDIDATE worker (not production) processed it -- download"
+  echo "   GET ${api_tagged_url}/api/v1/missions/<id>/evidence/bundle and confirm:"
+  echo "     deployment.json.cloud_run_revision == '${candidate_worker_rev}' (candidate, recorded"
+  echo "       in step 1 above) and != '${prod_worker_rev:-<none>}' (current production worker)"
+  echo "     deployment.json.git_sha == '${GIT_SHA}'"
 
-  echo "4. Re-submit the SAME idempotency key and confirm exactly one terminal mission/decision"
-  echo "   exists for it (proves the candidate path is idempotent under redelivery, matching"
-  echo "   the existing tested guarantee in tests/agents/test_worker_delivery_outcomes.py)."
+  echo "5. Re-publish the SAME idempotency key a second time (into ${verify_topic}, still never"
+  echo "   production) and confirm exactly one terminal mission/decision exists for it -- proves"
+  echo "   the candidate path is idempotent under redelivery, matching the existing tested"
+  echo "   guarantee in tests/agents/test_worker_delivery_outcomes.py."
 
-  echo "   (Steps 3-4 issue real authenticated HTTP calls and are intentionally left as an"
+  echo "   (Steps 4-5 issue real authenticated HTTP calls and are intentionally left as an"
   echo "   explicit manual/CI action, not auto-executed here, so this script never silently"
   echo "   fabricates a synthetic-tenant mission against production infrastructure without a"
   echo "   human or CI pipeline directly observing each response.)"
   echo ""
-  echo "Once steps 3-4 above are confirmed successful, run:"
+  echo "Once steps 4-5 above are confirmed successful -- INCLUDING the revision/SHA evidence"
+  echo "check -- run:"
   echo "  $0 --record-verified"
-  echo "to write the marker promote_candidate_to_production.sh requires."
+  echo "to resolve+pin the verified digests and write the marker promote_candidate_to_production.sh"
+  echo "requires. Cleanup of ${verify_topic}/${verify_sub} above runs regardless, success or"
+  echo "failure, and never deletes that acceptance evidence."
 }
 
 record_verified() {
   mkdir -p "$VERIFIED_MARKER_DIR"
+
+  local rating_engine_rev worker_rev api_rev web_rev
+  local rating_engine_digest worker_digest api_digest web_digest
+  rating_engine_rev="$(tagged_revision_name rateguard-rating-engine)"
+  worker_rev="$(tagged_revision_name rateguard-worker)"
+  api_rev="$(tagged_revision_name rateguard-api)"
+  web_rev="$(tagged_revision_name rateguard-web)"
+  if [ -z "$rating_engine_rev" ] || [ -z "$worker_rev" ] || [ -z "$api_rev" ] || [ -z "$web_rev" ]; then
+    echo "Error: could not resolve all four candidate-tagged revisions (rating-engine=${rating_engine_rev:-<none>}," >&2
+    echo "worker=${worker_rev:-<none>}, api=${api_rev:-<none>}, web=${web_rev:-<none>}). Refusing to record" >&2
+    echo "a verified marker for an incomplete/moved candidate deployment." >&2
+    exit 1
+  fi
+  rating_engine_digest="$(resolve_revision_digest rateguard-rating-engine "$rating_engine_rev")"
+  worker_digest="$(resolve_revision_digest rateguard-worker "$worker_rev")"
+  api_digest="$(resolve_revision_digest rateguard-api "$api_rev")"
+  web_digest="$(resolve_revision_digest rateguard-web "$web_rev")"
+  if [ -z "$worker_digest" ] || [ "$worker_digest" != "$api_digest" ]; then
+    echo "Error: candidate worker digest (${worker_digest:-<none>}) does not match candidate API" >&2
+    echo "digest (${api_digest:-<none>}) at record-verified time. Refusing to pin mismatched digests." >&2
+    exit 1
+  fi
+
   printf 'verified at %s by %s\n' \
     "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(whoami 2>/dev/null || echo unknown)" \
     > "${VERIFIED_MARKER_DIR}/${GIT_SHA}"
+
+  # Structured evidence promote_candidate_to_production.sh reads to RESOLVE
+  # AND PIN the exact digests it promotes, refusing to proceed if the
+  # `candidate` tag has since moved to a different, unverified deployment.
+  cat > "${VERIFIED_MARKER_DIR}/${GIT_SHA}.evidence" <<EVIDENCE
+GIT_SHA=${GIT_SHA}
+VERIFIED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+RATING_ENGINE_REVISION=${rating_engine_rev}
+RATING_ENGINE_DIGEST=${rating_engine_digest}
+WORKER_REVISION=${worker_rev}
+WORKER_DIGEST=${worker_digest}
+API_REVISION=${api_rev}
+API_DIGEST=${api_digest}
+WEB_REVISION=${web_rev}
+WEB_DIGEST=${web_digest}
+EVIDENCE
+
   echo "Verified marker written: ${VERIFIED_MARKER_DIR}/${GIT_SHA}"
-  echo "promote_candidate_to_production.sh will now accept this SHA without --skip-verification-check."
+  echo "Verified evidence (pinned digests) written: ${VERIFIED_MARKER_DIR}/${GIT_SHA}.evidence"
+  echo "promote_candidate_to_production.sh will now accept this SHA without --skip-verification-check,"
+  echo "and will refuse to promote if the candidate tag has since moved off these exact digests."
 }
 
 case "$MODE" in

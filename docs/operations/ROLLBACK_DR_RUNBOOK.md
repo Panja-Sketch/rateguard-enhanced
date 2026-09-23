@@ -7,6 +7,10 @@
   `rateguard-api-00004-hwh`, rating engine `rateguard-rating-engine-00003-bn5`, web `rateguard-web-00003-tbr`.
 * Traffic rollback: `gcloud run services update-traffic <service> --region us-central1 --to-revisions <PREV>=100`
   (all four services; `infrastructure/rollback.sh --rollback ...`). Revisions are never deleted.
+  `promote_candidate_to_production.sh --promote --auto-rollback-on-failure` prints and invokes this same
+  `rollback.sh` command automatically if its own post-promotion web-bundle/Pub/Sub-routing check fails —
+  `rollback.sh` still requires its own explicit `--rollback` confirmation and only prints the `gcloud`
+  commands rather than executing them (see the note at the bottom of that script).
 * **Data compatibility:** the new release only *adds* the `impact_jobs` collection. Old revisions ignore it. Old
   missions/evidence stay readable by new and old revisions (doubled `CONNECTOR_CONNECTOR_` codes are normalised on read).
 * **Pub/Sub:** if the worker is rolled back while `impact-batches` messages are in flight, the old worker has no

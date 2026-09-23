@@ -33,9 +33,19 @@ substitutions:
   _NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID: ''
   _NEXT_PUBLIC_FIREBASE_APP_ID: ''
   _NEXT_PUBLIC_FIREBASE_MEASUREMENT_ID: ''
-  # Default preserves the existing production build behavior exactly
-  # (no deploy script other than a candidate deploy passes _IMAGE_TAG). A candidate/staging build
-  # passes an immutable tag derived from the git commit SHA instead, and
-  # bakes in the candidate-tagged API URL via _NEXT_PUBLIC_RATEGUARD_API_URL
-  # — see infrastructure/deploy_candidate_enhanced.sh.
+  # Default preserves the existing production build behavior exactly (no
+  # deploy script other than a candidate deploy passes _IMAGE_TAG). A
+  # candidate/staging build passes an immutable tag derived from the git
+  # commit SHA instead -- see infrastructure/deploy_candidate_enhanced.sh.
+  #
+  # _NEXT_PUBLIC_RATEGUARD_API_URL is a `next dev` / no-runtime-config
+  # fallback ONLY. The actual API base URL a deployed image calls is chosen
+  # at deploy time, not build time: RATEGUARD_API_URL (a plain Cloud Run env
+  # var, deliberately NOT NEXT_PUBLIC_*, so it is never baked into client
+  # JS) is read per-request by the root layout and injected as
+  # window.__RATEGUARD_RUNTIME_CONFIG__ -- see
+  # frontend/src/lib/runtimeConfig.ts. This is what lets the exact same web
+  # image digest be deployed unchanged as both the candidate (candidate API
+  # URL) and the production release (stable production API URL) -- see
+  # infrastructure/promote_candidate_to_production.sh.
   _IMAGE_TAG: 'latest'

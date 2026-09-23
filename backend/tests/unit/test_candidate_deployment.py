@@ -162,6 +162,29 @@ def test_enhanced_deploy_api_and_worker_share_one_backend_image_variable() -> No
     assert "assert_api_worker_same_digest" in text
 
 
+def test_enhanced_deploy_plan_never_declares_a_separate_worker_image_variable(enhanced_deploy_plan) -> None:
+    """BLOCKER 1 regression: a prior version of this script declared a
+    WORKER_IMAGE variable (pointed at a DIFFERENT Artifact Registry
+    repository path than the API image) and the printed plan quoted it for
+    the worker deploy command, while the real deploy_candidate() function
+    always used BACKEND_IMAGE for both -- so the printed plan and the actual
+    gcloud calls silently diverged. There must be no WORKER_IMAGE variable
+    at all, and the printed worker/API deploy commands must reference the
+    identical image string."""
+    text = (REPO_ROOT / "infrastructure" / "deploy_candidate_enhanced.sh").read_text(encoding="utf-8")
+    assert "WORKER_IMAGE=" not in text
+    worker_line = next(
+        line for line in enhanced_deploy_plan.stdout.splitlines() if line.strip().startswith("gcloud run deploy rateguard-worker")
+    )
+    api_line = next(
+        line for line in enhanced_deploy_plan.stdout.splitlines() if line.strip().startswith("gcloud run deploy rateguard-api")
+    )
+    worker_image = worker_line.split("--image", 1)[1].strip().split(" ")[0]
+    api_image = api_line.split("--image", 1)[1].strip().split(" ")[0]
+    assert worker_image == api_image, f"printed plan uses different images for worker ({worker_image!r}) and api ({api_image!r})"
+    assert "/rateguard-api:" in worker_image
+
+
 def test_enhanced_deploy_rating_engine_invoker_iam_targets_rating_engine_service() -> None:
     text = (REPO_ROOT / "infrastructure" / "deploy_candidate_enhanced.sh").read_text(encoding="utf-8")
     assert "add-iam-policy-binding rateguard-rating-engine" in text
@@ -206,6 +229,56 @@ def test_enhanced_deploy_verify_candidate_never_modifies_real_subscription() -> 
     # the only mention of "modify-push-config" is inside a comment/error
     # message explaining that this script never does that.
     assert "gcloud pubsub subscriptions modify-push-config" not in text
+
+
+def test_enhanced_deploy_verify_candidate_uses_isolated_topic_not_production_topic() -> None:
+    """BLOCKER 2 regression: a prior version of this script created a
+    disposable *subscription* on the shared PRODUCTION topic (assurance-runs)
+    for verification. Pub/Sub fan-out means every subscription on a topic
+    receives every message published to it, so that subscription ALSO
+    delivered every verification message to the real production worker via
+    assurance-runs-worker-sub, racing it against the candidate worker and
+    proving nothing about which one actually processed it. Verification must
+    instead create its own SHA-scoped, fully isolated topic (never a
+    subscription directly on PROD_PUBSUB_TOPIC), and must retarget the
+    candidate API's own publish topic at it so a verification mission is
+    never published to the production topic in the first place."""
+    text = (REPO_ROOT / "infrastructure" / "deploy_candidate_enhanced.sh").read_text(encoding="utf-8")
+    assert "VERIFY_TOPIC_PREFIX=" in text
+    assert 'gcloud pubsub topics create "$verify_topic"' in text
+    assert 'gcloud pubsub subscriptions create "$verify_sub"' in text
+    assert '--topic="$verify_topic"' in text
+    # The old defect: a subscription created directly on the production topic.
+    assert '--topic="$PROD_PUBSUB_TOPIC"' not in text
+    # The candidate API's publish target must actually be retargeted.
+    assert 'RATEGUARD_PUBSUB_TOPIC=${verify_topic}' in text
+    # And restored afterward, unconditionally (cleanup trap).
+    assert 'RATEGUARD_PUBSUB_TOPIC=${PROD_PUBSUB_TOPIC}' in text
+    assert "cleanup_verify_resources" in text
+    assert "gcloud pubsub topics delete" in text
+
+
+def test_enhanced_deploy_verify_candidate_oidc_audience_is_stable_untagged_url() -> None:
+    """BLOCKER 4 regression: a prior version of this script used the
+    candidate-tagged (--tag) worker URL as the Pub/Sub push OIDC audience,
+    which was never validated against real Cloud Run push-auth behavior.
+    The proven-working form used by this project's own live, functioning
+    impact-batches subscription (infrastructure/setup_impact_pubsub.sh) is
+    the service's STABLE, untagged base URL -- verification must use that
+    same form, not the movable tag URL."""
+    text = (REPO_ROOT / "infrastructure" / "deploy_candidate_enhanced.sh").read_text(encoding="utf-8")
+    assert '--push-auth-token-audience="$worker_untagged_url"' in text
+    assert '--push-auth-token-audience="$worker_tagged_url"' not in text
+
+
+def test_enhanced_deploy_record_verified_pins_digests_for_promotion() -> None:
+    text = (REPO_ROOT / "infrastructure" / "deploy_candidate_enhanced.sh").read_text(encoding="utf-8")
+    assert "record_verified" in text
+    assert ".evidence" in text
+    assert "RATING_ENGINE_DIGEST=" in text
+    assert "WORKER_DIGEST=" in text
+    assert "API_DIGEST=" in text
+    assert "WEB_DIGEST=" in text
 
 
 def test_enhanced_deploy_env_carries_the_approved_guardrail_values() -> None:
@@ -290,10 +363,32 @@ def test_rollback_supports_optional_rating_engine_revision() -> None:
 # --- promote_candidate_to_production.sh ---
 
 
-def test_promote_default_mode_captures_prior_revisions_for_rollback() -> None:
-    result = _run_bash_script("infrastructure/promote_candidate_to_production.sh", timeout=90)
-    assert result.returncode == 0
-    assert "Currently-live production revisions (captured now, BEFORE any promotion" in result.stdout
+@pytest.fixture(scope="module")
+def promote_plan() -> subprocess.CompletedProcess:
+    return _run_bash_script("infrastructure/promote_candidate_to_production.sh", timeout=90)
+
+
+def test_promote_default_mode_captures_prior_revisions_for_rollback(promote_plan) -> None:
+    assert promote_plan.returncode == 0
+    assert "PRODUCTION-CONFIG RELEASE REVISIONS (currently-live, captured now BEFORE any" in promote_plan.stdout
+
+
+def test_promote_plan_prints_all_required_dry_run_fields(promote_plan) -> None:
+    """The dry-run output must explicitly cover every field required for a
+    safe promotion review: candidate resources, verified digests,
+    production-config release revisions, stable production URLs, the CORS
+    transition, the OIDC audience, the cleanup plan, and rollback revisions."""
+    for expected in (
+        "CANDIDATE RESOURCES",
+        "VERIFIED DIGESTS",
+        "PRODUCTION-CONFIG RELEASE REVISIONS",
+        "STABLE PRODUCTION URLs",
+        "CORS TRANSITION",
+        "CLEANUP PLAN",
+        "ROLLBACK REVISIONS",
+    ):
+        assert expected in promote_plan.stdout, f"missing required dry-run field: {expected}"
+    assert "OIDC audience" in promote_plan.stdout or "oidcToken.audience" in promote_plan.stdout
 
 
 def test_promote_requires_a_verified_marker_by_default() -> None:
@@ -336,6 +431,63 @@ def test_promote_web_image_tag_is_full_sha_not_short() -> None:
     text = (REPO_ROOT / "infrastructure" / "promote_candidate_to_production.sh").read_text(encoding="utf-8")
     assert 'git rev-parse HEAD' in text
     assert "--short=12" not in text
+
+
+def test_promote_never_rebuilds_any_image_including_web() -> None:
+    """BLOCKER 3/4 regression: a prior version of this script ran
+    `gcloud builds submit ./frontend ...` here to bake the production API
+    URL into a freshly built web image, which meant the promoted web image
+    was never byte-for-byte what --verify-candidate had tested. Promotion
+    must reuse the exact candidate web image digest and change only runtime
+    config (RATEGUARD_API_URL)."""
+    text = (REPO_ROOT / "infrastructure" / "promote_candidate_to_production.sh").read_text(encoding="utf-8")
+    assert "gcloud builds submit" not in text
+    assert "resolve_revision_digest rateguard-web" in text
+    assert "RATEGUARD_API_URL=" in text
+
+
+def test_promote_repoints_rating_engine_connector_url_at_stable_production_url() -> None:
+    """BLOCKER 4 regression: a prior version of this script's worker/api
+    --update-env-vars calls never included
+    RATEGUARD_RATING_ENGINE_CONNECTOR_BASE_URL, so a promoted revision kept
+    calling the movable candidate-tagged rating-engine URL forever instead
+    of the stable production one."""
+    text = (REPO_ROOT / "infrastructure" / "promote_candidate_to_production.sh").read_text(encoding="utf-8")
+    assert "PROD_RATING_ENGINE_URL=" in text
+    assert text.count("RATEGUARD_RATING_ENGINE_CONNECTOR_BASE_URL=${PROD_RATING_ENGINE_URL}") == 2
+    assert text.count("RATEGUARD_VENDOR_GATEWAY_CONNECTOR_BASE_URL=${PROD_RATING_ENGINE_URL}") == 2
+
+
+def test_promote_pins_and_cross_checks_verified_digests_before_promoting() -> None:
+    """BLOCKER 4 regression: a prior version of this script only checked
+    that a verified-marker FILE existed for the SHA, never that the digests
+    currently sitting under the `candidate` tag still matched what was
+    actually verified -- so re-deploying a different, unverified candidate
+    after verification would still be silently promoted."""
+    text = (REPO_ROOT / "infrastructure" / "promote_candidate_to_production.sh").read_text(encoding="utf-8")
+    assert ".evidence" in text
+    assert "RATING_ENGINE_REVISION" in text
+    assert "candidate tag has moved since" in text
+
+
+def test_promote_confirms_dedicated_rating_engine_service_account() -> None:
+    text = (REPO_ROOT / "infrastructure" / "promote_candidate_to_production.sh").read_text(encoding="utf-8")
+    assert "RATING_ENGINE_SA=" in text
+    assert "spec.serviceAccountName" in text
+
+
+def test_promote_oidc_audience_check_rejects_tag_scoped_audience_post_promotion() -> None:
+    text = (REPO_ROOT / "infrastructure" / "promote_candidate_to_production.sh").read_text(encoding="utf-8")
+    assert "PUSH_AUDIENCE_AFTER" in text
+    assert 'echo "$PUSH_AUDIENCE_AFTER" | grep -qE "candidate---|verify---"' in text
+
+
+def test_promote_supports_auto_rollback_on_failure_flag() -> None:
+    text = (REPO_ROOT / "infrastructure" / "promote_candidate_to_production.sh").read_text(encoding="utf-8")
+    assert "--auto-rollback-on-failure" in text
+    assert "AUTO_ROLLBACK_ON_FAILURE" in text
+    assert "run_rollback_now" in text
+    assert "infrastructure/rollback.sh --rollback" in text
 
 
 def test_verify_candidate_refuses_without_opt_in() -> None:

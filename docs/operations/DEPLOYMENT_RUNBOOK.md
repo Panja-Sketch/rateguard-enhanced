@@ -92,6 +92,26 @@ binding for the calling service account; a 5xx/timeout is an engine problem. Ope
 `CONNECTOR_UNAVAILABLE`. Rollback of a bad connector change is the ordinary `rollback.sh` revision rollback
 (settings are per-revision env vars, so the prior revision restores the prior endpoint and audience).
 
+## Known deployment-tooling limitations (documented, scheduled for operational hardening)
+
+Neither item affects runtime security, authorization, rate limiting, data routing, monitoring, evidence or
+rollback; both were classified after the `f2df35d` production promotion.
+
+1. **`RATEGUARD_ENVIRONMENT=candidate` on promoted API/worker revisions.** The candidate env files set it and
+   `promote_candidate_to_production.sh` repoints only the data-plane and connector variables. The application reads
+   the value in exactly one place (`startup_checks.py`), where `candidate`, `staging` and `production` receive the
+   *same* strict validation (no auth emulator, https CORS origins, rate limiting enforced, authenticated https
+   connector with an explicit stable audience). Rate limits are set explicitly and enabled; data routing and Pub/Sub
+   use explicit variables; evidence records git SHA, service, revision and digest, not the label; monitoring keys on
+   service names. The previous production revisions carried the same label. Cosmetic/hygiene only; the promote
+   script should set it to `production` in a later release (and `runtime-env.rateguard-enhanced.yaml` already does).
+2. **`promote_candidate_to_production.sh --promote --canary-percent=N` cannot be completed by a bare `--promote`.**
+   The script captures the prior production revision as the one at exactly 100% traffic; after a canary traffic is
+   split, the capture is empty and the script exits before making any change (fail-closed). Workaround used:
+   return traffic to 100% on the prior revisions (`rollback.sh` prints the `update-traffic` commands), then run a
+   direct `--promote`. The fix is to record the prior revision before the canary starts, or accept it as an argument.
+   `rollback.sh` itself only prints commands by design; it is not affected.
+
 Compatibility rule: Firestore/GCS changes in a release must be backward compatible with the previous
 revision (additive collections/fields only). Prompt 8 adds `impact_jobs` (+`batches` TTL), never mutating
 existing documents, so the previous revisions run unchanged.

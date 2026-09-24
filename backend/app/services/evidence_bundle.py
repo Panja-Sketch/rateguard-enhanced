@@ -88,12 +88,12 @@ _GEMINI_FIELDS = (
 )
 _CONNECTOR_EVIDENCE_FIELDS = (
     "connector_id", "engine_version", "correlation_id", "connector_request_id", "request_sha256",
-    "response_sha256", "status", "final_premium", "error_code", "scenario_id", "probe_origin",
-    "calculation_date", "calculation_date_source",
+    "response_sha256", "status", "final_premium", "error_code", "error_class", "scenario_id",
+    "probe_origin", "calculation_date", "calculation_date_source",
 )
 _EXPERIMENT_FIELDS = (
     "experiment_id", "probe_name", "category", "risk_inputs", "expected_premium", "actual_premium", "matches",
-    "outcome", "inconclusive_reason", "calculation_date", "calculation_date_source", "probe_origin",
+    "outcome", "inconclusive_reason", "inconclusive_class", "calculation_date", "calculation_date_source", "probe_origin",
 )
 _EXPLANATION_FIELDS = (
     "explanation_id", "status", "source", "validated", "facts_sha256", "created_at", "reviewed_at",

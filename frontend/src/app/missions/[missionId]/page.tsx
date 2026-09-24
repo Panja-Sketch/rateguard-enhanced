@@ -26,6 +26,7 @@ import { TestPlanViewer } from '@/components/assurance/TestPlanViewer';
 import { ReconciliationTrace } from '@/components/assurance/ReconciliationTrace';
 import { PortfolioImpactFunnel } from '@/components/assurance/PortfolioImpactFunnel';
 import { ConnectorImpactPanel } from '@/components/assurance/ConnectorImpactPanel';
+import { notInvokedExplanation } from '@/lib/deterministicOutcome';
 import { useAuth } from '@/lib/auth/AuthProvider';
 import { EvidenceLineage } from '@/components/assurance/EvidenceLineage';
 import { AgentActivityPanel } from '@/components/assurance/AgentActivityPanel';
@@ -537,7 +538,7 @@ export default function MissionDetailPage() {
                 }
               >
                 {result?.ai_runtime?.model_status === 'NOT_INVOKED_DETERMINISTIC_PIPELINE'
-                  ? 'Gemini not invoked by design — zero diffs were found deterministically, so no decision required AI judgment.'
+                  ? notInvokedExplanation(experimentsSec?.data)
                   : `Model Status: ${result?.ai_runtime?.model_status || 'Unknown'}`}
               </span>
             </div>

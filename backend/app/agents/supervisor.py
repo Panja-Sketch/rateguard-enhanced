@@ -1141,6 +1141,7 @@ class AssuranceSupervisor:
         connector_client = self._connector_client_factory() if target_connector is not None else None
         connector_budget = TargetBudget() if target_connector is not None else None
         connector_evidence_ids: list[str] = []
+        last_connector_failure_class: list[str | None] = [None]
 
         def _quote_via_connector(
             tc: PricingTestScenario, calc_date: date, calc_source: object
@@ -1196,6 +1197,7 @@ class AssuranceSupervisor:
                 )
             except ConnectorException as exc:
                 status = "PARTIAL_RESPONSE" if exc.category == ConnectorFailureCategory.REVIEW_REQUIRED else "CONNECTOR_FAILURE"
+                last_connector_failure_class[0] = exc.failure_class.value
                 ev = EvidenceRecord(
                     evidence_id=f"EV-{uuid.uuid4().hex[:6].upper()}",
                     run_id=mission.mission_id,
@@ -1214,6 +1216,7 @@ class AssuranceSupervisor:
                         "response_sha256": None,
                         "status": status,
                         "error_code": exc.error.code,
+                        "error_class": exc.failure_class.value,
                         "final_premium": None,
                     },
                 )
@@ -1265,6 +1268,7 @@ class AssuranceSupervisor:
             calc_source = None
             outcome = "MATCH"
             reason: str | None = None
+            reason_class: str | None = None
             try:
                 expected = oracle.calculate_policy_premium(
                     tc.risk_values, effective_date=tc.effective_date, transaction_type=tc.transaction_type
@@ -1273,9 +1277,11 @@ class AssuranceSupervisor:
                     expected.final_premium, expected.calculation_date, expected.calculation_date_source,
                 )
                 if target_connector is not None:
+                    last_connector_failure_class[0] = None
                     act_prem, status = _quote_via_connector(tc, calc_date, calc_source)
                     if act_prem is None:
                         outcome, reason = "INCONCLUSIVE", (status if status.startswith("CONNECTOR_") else f"CONNECTOR_{status}")
+                        reason_class = last_connector_failure_class[0]
                 elif target_calc:
                     act_prem = target_calc.calculate_policy_premium(
                         tc.risk_values, effective_date=tc.effective_date, transaction_type=tc.transaction_type
@@ -1308,6 +1314,7 @@ class AssuranceSupervisor:
                 matches=outcome == "MATCH",
                 outcome=outcome,
                 inconclusive_reason=reason,
+                inconclusive_class=reason_class,
                 **_probe_trace_fields(tc, calc_date, calc_source),
             )
 

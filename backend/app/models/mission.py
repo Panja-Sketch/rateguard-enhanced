@@ -131,6 +131,11 @@ class RuntimeExperiment(BaseModel):
     # calculation date could not support a pricing conclusion).
     outcome: str = "MATCH"
     inconclusive_reason: str | None = None
+    # Failure class (`CONNECTOR_AUTH_DENIED`, `CONNECTOR_TIMEOUT`,
+    # `CONNECTOR_CONTRACT_ERROR`, `CONNECTOR_VERSION_UNSUPPORTED`,
+    # `CONNECTOR_UNAVAILABLE`) when the probe was inconclusive because the
+    # connector could not be used; never carries any endpoint or payload detail.
+    inconclusive_class: str | None = None
     calculation_date: str | None = None
     calculation_date_source: str | None = None
     probe_origin: str | None = None  # CONTROL_CASE | BASELINE | BOUNDARY | MUTATION

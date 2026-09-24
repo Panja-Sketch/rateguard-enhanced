@@ -665,6 +665,7 @@ _SAFE_CONNECTOR_EVIDENCE_FIELDS = (
     "status",
     "final_premium",
     "error_code",
+    "error_class",
     "scenario_id",
     "probe_origin",
     "calculation_date",

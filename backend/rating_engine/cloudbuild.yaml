@@ -4,13 +4,15 @@ steps:
       - 'build'
       - '-f'
       - 'backend/rating_engine/Dockerfile'
+      - '--build-arg'
+      - 'ENGINE_SOURCE_COMMIT=${_IMAGE_TAG}'
       - '-t'
       - 'us-central1-docker.pkg.dev/${PROJECT_ID}/rateguard-images/rateguard-rating-engine:${_IMAGE_TAG}'
       - '.'
 images:
   - 'us-central1-docker.pkg.dev/${PROJECT_ID}/rateguard-images/rateguard-rating-engine:${_IMAGE_TAG}'
 substitutions:
-  # No default production tag exists for this service yet (CP11 was never
-  # executed) -- every build of this image must pass an explicit immutable
-  # tag (the git commit SHA), never 'latest'.
+  # Every build of this image must pass an explicit immutable tag (the full git
+  # commit SHA), never 'latest'. The same value is baked in as the engine's
+  # reported source commit.
   _IMAGE_TAG: 'untagged'

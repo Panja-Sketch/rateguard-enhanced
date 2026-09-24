@@ -15,6 +15,7 @@ from starlette.routing import Route
 
 from app.connectors.client import ConnectorClient
 from app.connectors.registry import ConnectorRegistryEntry
+from app.core.config import get_data_dir
 from app.impact.config import ImpactConfig
 from app.impact.coordinator import ConnectorImpactCoordinator
 from app.impact.dispatch import LocalBatchDispatcher
@@ -22,7 +23,7 @@ from app.impact.processor import BatchProcessor
 from app.impact.snapshot import PortfolioSnapshot, load_snapshot
 from app.impact.store import InMemoryImpactStore
 from app.ipir.v0_2.compat import lower_to_v0_1
-from rating_engine.engines.registry import load_engine_package
+from app.ipir.v0_2.package import IPIRPackageV2
 from rating_engine.main import app as engine_app
 
 ENTRY = ConnectorRegistryEntry(
@@ -45,7 +46,10 @@ def fast_config(**overrides) -> ImpactConfig:
 
 @pytest.fixture(scope="session")
 def package():
-    return lower_to_v0_1(load_engine_package("canonical-v1"))
+    # RateGuard's own approved-intent package (the IPIR fixture), independent of the
+    # black-box engine, which no longer exposes any RateGuard package.
+    fixture = get_data_dir() / "implementations" / "v0_2" / "canonical" / "AZ_HO3_GOLDEN_ipir.json"
+    return lower_to_v0_1(IPIRPackageV2.model_validate_json(fixture.read_text(encoding="utf-8")))
 
 
 @pytest.fixture(scope="session")

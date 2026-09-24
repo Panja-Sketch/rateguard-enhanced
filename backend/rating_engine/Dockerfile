@@ -1,30 +1,28 @@
+# RateGuard Demo Insurer Rating Engine (black-box REST reference engine).
+#
+# Independent image: it contains ONLY `backend/rating_engine` and its own pinned
+# requirements. It does not copy RateGuard's `app` package or the `data/`
+# directory, so it cannot import RateGuard's oracle, IPIR, workbook compiler,
+# test planner or decision code even by accident.
 FROM python:3.12-slim
 
 WORKDIR /app
 
-# Prevent Python from writing .pyc files and enable unbuffered output
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl \
-    gcc \
-    && rm -rf /var/lib/apt/lists/*
+# Git commit this image was built from (passed by cloudbuild.yaml); reported
+# through /capabilities as non-sensitive provenance.
+ARG ENGINE_SOURCE_COMMIT=unknown
+ENV ENGINE_SOURCE_COMMIT=${ENGINE_SOURCE_COMMIT}
 
-# Reuses the same `app.*` package (ipir, engines/oracle) as the API/worker
-# image — see docs/architecture/RATEGUARD_LOCKED_SOURCE_OF_TRUTH.md section
-# 19, which nests `rating_engine/` as a sibling of `app/` under `backend/`.
-COPY backend/pyproject.toml ./pyproject.toml
-COPY backend/app ./app
+COPY backend/rating_engine/requirements.txt ./requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
+
 COPY backend/rating_engine ./rating_engine
-COPY data ./data
-
-RUN pip install --no-cache-dir .
 
 EXPOSE 8080
 
-# This service is private/authenticated only when deployed (locked doc
-# section 12.2) — Cloud Run IAM invoker binding is applied at deploy time,
-# not by this Dockerfile. See docs/implementation/DECISIONS.md (D3): actual
-# deployment configuration is a later checkpoint (CP11), not this session.
+# Private in a deployment: Cloud Run IAM (no anonymous invocation) is applied at
+# deploy time by infrastructure/deploy_candidate_enhanced.sh, not by this file.
 CMD exec uvicorn rating_engine.main:app --host 0.0.0.0 --port ${PORT:-8080}

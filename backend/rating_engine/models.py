@@ -1,9 +1,20 @@
+"""Wire models for the RateGuard Demo Insurer Rating Engine's REST contract.
+Self-contained (no RateGuard import). Request models reject unknown fields, so a
+caller cannot smuggle tenant identity or authorization claims into a quote."""
+
 from datetime import UTC, date, datetime
+from enum import StrEnum
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.ipir.enums import TransactionType
+
+class TransactionType(StrEnum):
+    """Policy transaction contexts on the wire (this plan rates the first two)."""
+
+    NEW_BUSINESS = "NEW_BUSINESS"
+    RENEWAL = "RENEWAL"
+    POLICY_CHANGE = "POLICY_CHANGE"
 
 
 class QuoteRequest(BaseModel):

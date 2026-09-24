@@ -9,7 +9,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from pydantic import BaseModel, Field, field_validator
 
-from app.api.sources import source_accessible
+from app.api.sources import source_accessible, uploaded_source_sha256
 from app.auth import (
     AuthenticatedUser,
     require_admin,
@@ -155,6 +155,13 @@ def create_assurance_mission(
     ]
     if source_issues:
         raise _validation_error("Mission validation failed.", source_issues)
+
+    # The content hash is server-owned: the real SHA-256 of an uploaded source (read
+    # from the caller's own tenant artifact), otherwise None. A browser-supplied
+    # value is never trusted, for any source type.
+    for ref in (req.source_a, req.source_b):
+        if ref is not None:
+            ref.hash_checksum = uploaded_source_sha256(ref.source_id, user)
 
     mission_id = f"MIS-{uuid.uuid4().hex[:8].upper()}"
     correlation_id = f"CORR-{uuid.uuid4().hex[:8].upper()}"

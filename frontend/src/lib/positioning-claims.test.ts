@@ -89,6 +89,9 @@ describe('positioning page carries the locked positioning sentence and required 
   it('states the locked one-sentence positioning', () => {
     const normalized = normalizeWhitespace(source);
     expect(normalized).toContain('PricingCenter is where insurers author and configure rates.');
+    // The heading covers the whole category the copy describes, not a single vendor product.
+    expect(normalized).toContain('How RateGuard Complements Rating Platforms and Engines');
+    expect(normalized).not.toContain('Complements Guidewire PricingCenter');
     expect(normalized).toContain(
       'RateGuard complements Guidewire, Duck Creek, legacy platforms, and custom rating engines; it does not replace them.'
     );

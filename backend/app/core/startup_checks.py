@@ -10,6 +10,7 @@ import os
 from collections.abc import Mapping
 from typing import Any
 
+from app.connectors.auth_config import DEPLOYED_ENVIRONMENTS, settings_problems
 from app.core.config import Settings
 from app.core.runtime_config import (
     RuntimeConfigError,
@@ -52,6 +53,11 @@ def validate_startup_configuration(
             if not origin.startswith("https://") and not host_is_local:
                 problems.append("Non-local CORS origins must use https.")
                 break
+
+    # Connector authentication: an explicit ID-token audience, consistent with the
+    # endpoint, and (when deployed) authenticated https only - never derived
+    # implicitly from a possibly traffic-tagged endpoint.
+    problems.extend(settings_problems(settings, deployed=settings.environment.lower() in DEPLOYED_ENVIRONMENTS))
 
     try:
         policies = resolve_policies(settings.rate_limits)

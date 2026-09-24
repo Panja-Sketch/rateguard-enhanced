@@ -186,6 +186,18 @@ def test_no_tracked_runtime_file_references_retired_models_or_firebase_key():
     assert not offenders, "\n".join(offenders)
 
 
+def _connector_settings(env: dict[str, str]) -> dict:
+    """The connector fields of `Settings`, taken from a deployed env mapping."""
+    return dict(
+        rating_engine_connector_base_url=env["RATEGUARD_RATING_ENGINE_CONNECTOR_BASE_URL"],
+        rating_engine_connector_audience=env["RATEGUARD_RATING_ENGINE_CONNECTOR_AUDIENCE"],
+        rating_engine_connector_is_local_dev=env["RATEGUARD_RATING_ENGINE_CONNECTOR_IS_LOCAL_DEV"] == "true",
+        rating_engine_connector_auth_mode=env["RATEGUARD_RATING_ENGINE_CONNECTOR_AUTH_MODE"],
+        vendor_gateway_connector_base_url=env["RATEGUARD_VENDOR_GATEWAY_CONNECTOR_BASE_URL"],
+        vendor_gateway_connector_audience=env["RATEGUARD_VENDOR_GATEWAY_CONNECTOR_AUDIENCE"],
+    )
+
+
 def _deploy_env_block(role: str) -> dict[str, str]:
     """Render the candidate script's env heredoc the way bash would, for `role`."""
     import re
@@ -204,6 +216,10 @@ def _deploy_env_block(role: str) -> dict[str, str]:
         else:
             raw = raw.strip('"')
         raw = raw.replace("${role}", role)
+        # Values only known at deploy time (discovered after the engine deploys).
+        raw = raw.replace("${RATING_ENGINE_TAGGED_URL}", "https://candidate---rateguard-rating-engine-abc123-uc.a.run.app")
+        raw = raw.replace("${RATING_ENGINE_STABLE_URL}", "https://rateguard-rating-engine-abc123-uc.a.run.app")
+        raw = raw.replace("${BACKEND_DIGEST}", "sha256:" + "0" * 64)
         for name, value in values.items():
             raw = raw.replace("${" + name + "}", value)
         env[key] = raw
@@ -226,7 +242,11 @@ def test_candidate_cloud_run_env_satisfies_the_startup_contract(role):
         cors_origins=json.loads(env["RATEGUARD_CORS_ORIGINS"]),
         service_role=role,
         rate_limits=json.loads(env["RATEGUARD_RATE_LIMITS"]),
+        **_connector_settings(env),
     )
+    # Candidate: tagged request endpoint, stable audience - and they differ.
+    assert settings.rating_engine_connector_base_url != settings.rating_engine_connector_audience
+    assert "---" in settings.rating_engine_connector_base_url and "---" not in settings.rating_engine_connector_audience
     summary = validate_startup_configuration(settings, env)
     assert summary["gemini_model"] == "gemini-3.1-flash-lite" and summary["vertex_ai_location"] == "us"
     # Guardrails and rate limits are explicitly configured, not left to defaults.
@@ -251,7 +271,10 @@ def test_production_baseline_env_file_satisfies_the_startup_contract():
         firebase_project_id=env["RATEGUARD_FIREBASE_PROJECT_ID"],
         environment=env["RATEGUARD_ENVIRONMENT"],
         cors_origins=json.loads(env["RATEGUARD_CORS_ORIGINS"]),
+        **_connector_settings(env),
     )
+    # Production: the stable URL is both the endpoint and the audience.
+    assert settings.rating_engine_connector_base_url == settings.rating_engine_connector_audience
     summary = validate_startup_configuration(settings, {k: str(v) for k, v in env.items()})
     assert summary["vertex_ai_location"] == "us"
     assert summary["guardrails"] == {

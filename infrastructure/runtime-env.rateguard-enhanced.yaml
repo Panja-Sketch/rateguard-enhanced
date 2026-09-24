@@ -70,3 +70,17 @@ RATEGUARD_IMPACT_MAX_MISSION_SECONDS: "540"
 RATEGUARD_IMPACT_MAX_MISMATCH_EXAMPLES: "20"
 RATEGUARD_IMPACT_MAX_EVIDENCE_BYTES: "512000"
 RATEGUARD_IMPACT_TOPIC: "impact-batches"
+
+# Private rating-engine connector (versioned REST contract). In production the
+# request endpoint AND the Google ID-token audience are both the STABLE
+# (untagged) service URL; startup fails closed if the audience is missing or
+# inconsistent with the endpoint. A candidate deployment instead uses the
+# traffic-tagged URL as the endpoint and keeps this stable URL as the audience
+# (deploy_candidate_enhanced.sh). No API key or shared secret is involved: the
+# caller's service-account identity mints the ID token.
+RATEGUARD_RATING_ENGINE_CONNECTOR_BASE_URL: "https://rateguard-rating-engine-nwhotixfva-uc.a.run.app"
+RATEGUARD_RATING_ENGINE_CONNECTOR_AUDIENCE: "https://rateguard-rating-engine-nwhotixfva-uc.a.run.app"
+RATEGUARD_RATING_ENGINE_CONNECTOR_IS_LOCAL_DEV: "false"
+RATEGUARD_RATING_ENGINE_CONNECTOR_AUTH_MODE: "google_id_token"
+RATEGUARD_VENDOR_GATEWAY_CONNECTOR_BASE_URL: "https://rateguard-rating-engine-nwhotixfva-uc.a.run.app"
+RATEGUARD_VENDOR_GATEWAY_CONNECTOR_AUDIENCE: "https://rateguard-rating-engine-nwhotixfva-uc.a.run.app"

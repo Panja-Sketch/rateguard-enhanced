@@ -68,6 +68,30 @@ tested candidate); commands below are what those scripts run.
    its own explicit `--rollback` confirmation). Verify a live mission after promotion.
 6. **Rollback** — `infrastructure/rollback.sh --rollback ...` (see `ROLLBACK_DR_RUNBOOK.md`).
 
+### Rating-engine connector: endpoint vs. ID-token audience
+
+The connector has two **separate, explicit** settings (never derive one from the other):
+
+| Setting | Candidate | Production |
+| --- | --- | --- |
+| `RATEGUARD_RATING_ENGINE_CONNECTOR_BASE_URL` (request endpoint) | candidate-**tagged** engine URL (`candidate---rateguard-rating-engine-…`) | stable engine URL |
+| `RATEGUARD_RATING_ENGINE_CONNECTOR_AUDIENCE` (Google ID-token audience) | stable engine URL | stable engine URL |
+
+(`RATEGUARD_VENDOR_GATEWAY_CONNECTOR_*` mirror these for the second registered wire shape.) Cloud Run
+authenticates a token against the **service** URL; a token minted for a traffic-tagged URL is rejected with
+HTTP 401 before the request reaches the engine, which surfaces as `CONNECTOR_AUTH_DENIED` on every probe and a
+`REVIEW_REQUIRED` decision. Startup **fails closed** in `candidate`/`staging`/`production` if the audience is
+missing, not https, tagged, unrelated to the endpoint, or if auth mode is not `google_id_token` /
+`IS_LOCAL_DEV` is not `false`. The candidate script writes both settings into the worker and API env files
+(after discovering the engine's stable URL); promotion sets endpoint and audience to the stable URL.
+
+Triage: `gcloud logging read` on `rateguard-rating-engine` request logs — a 401 with
+`www-authenticate: invalid_token` is an audience/identity problem; a 403 is a missing `roles/run.invoker`
+binding for the calling service account; a 5xx/timeout is an engine problem. Operator-facing classes:
+`CONNECTOR_AUTH_DENIED`, `CONNECTOR_TIMEOUT`, `CONNECTOR_CONTRACT_ERROR`, `CONNECTOR_VERSION_UNSUPPORTED`,
+`CONNECTOR_UNAVAILABLE`. Rollback of a bad connector change is the ordinary `rollback.sh` revision rollback
+(settings are per-revision env vars, so the prior revision restores the prior endpoint and audience).
+
 Compatibility rule: Firestore/GCS changes in a release must be backward compatible with the previous
 revision (additive collections/fields only). Prompt 8 adds `impact_jobs` (+`batches` TTL), never mutating
 existing documents, so the previous revisions run unchanged.

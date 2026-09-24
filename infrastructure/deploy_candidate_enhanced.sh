@@ -332,7 +332,14 @@ Exact commands --deploy-candidate would run, in order:
      gcloud run deploy rateguard-rating-engine --image ${RATING_ENGINE_IMAGE} \\
        --region ${REGION} --no-traffic --tag ${CANDIDATE_TAG} \\
        --no-allow-unauthenticated --service-account ${RATING_ENGINE_SA} \\
-       --memory=512Mi
+       --memory=512Mi \\
+       --update-env-vars RATEGUARD_GIT_SHA=<full SHA>,RATEGUARD_IMAGE_DIGEST=<engine image digest>
+     The candidate-TAGGED URL is the connector's REQUEST endpoint; the STABLE
+     (untagged) service URL is its Google ID-token AUDIENCE
+     (RATEGUARD_RATING_ENGINE_CONNECTOR_AUDIENCE): Cloud Run rejects a token
+     minted for a traffic-tagged URL with HTTP 401. Both are written into the
+     worker/API env files, generated only after the engine's URLs are known.
+     The engine image is built from backend/rating_engine only (no RateGuard code).
 
   3) Deploy worker candidate (PRIVATE -- Pub/Sub push only, OIDC-authenticated),
      wired at the PRODUCTION Firestore/GCS/BigQuery names above -- from the
@@ -503,6 +510,13 @@ RATEGUARD_EXECUTION_MODE: "pubsub"
 RATEGUARD_PUBSUB_TOPIC: "${PROD_PUBSUB_TOPIC}"
 RATEGUARD_IMPACT_TOPIC: "${PROD_IMPACT_TOPIC}"
 RATEGUARD_DATA_DIR: "/app/data"
+RATEGUARD_RATING_ENGINE_CONNECTOR_BASE_URL: "${RATING_ENGINE_TAGGED_URL}"
+RATEGUARD_RATING_ENGINE_CONNECTOR_AUDIENCE: "${RATING_ENGINE_STABLE_URL}"
+RATEGUARD_RATING_ENGINE_CONNECTOR_IS_LOCAL_DEV: "false"
+RATEGUARD_RATING_ENGINE_CONNECTOR_AUTH_MODE: "google_id_token"
+RATEGUARD_VENDOR_GATEWAY_CONNECTOR_BASE_URL: "${RATING_ENGINE_TAGGED_URL}"
+RATEGUARD_VENDOR_GATEWAY_CONNECTOR_AUDIENCE: "${RATING_ENGINE_STABLE_URL}"
+RATEGUARD_IMAGE_DIGEST: "${BACKEND_DIGEST}"
 RATEGUARD_RATE_LIMIT_ENABLED: "true"
 RATEGUARD_RATE_LIMITS: '{"connector_test":"5/3600","mission_create":"10/3600","source_upload":"30/3600","source_compile":"30/3600","explanation_create":"20/3600","evidence_download":"30/3600","source_download":"60/3600"}'
 RATEGUARD_CORS_ORIGINS: '["http://localhost:3000"]'
@@ -594,9 +608,6 @@ deploy_candidate() {
   preflight_guards
   gcloud config set project "$PROJECT_ID" >/dev/null
 
-  write_candidate_env_file api "$CANDIDATE_ENV_FILE_API"
-  write_candidate_env_file worker "$CANDIDATE_ENV_FILE_WORKER"
-
   echo "1a. Building rating-engine image..."
   gcloud builds submit . --config=./backend/rating_engine/cloudbuild.yaml \
     --substitutions=_IMAGE_TAG="$IMAGE_TAG"
@@ -619,14 +630,27 @@ deploy_candidate() {
     --image "$RATING_ENGINE_IMAGE" --region "$REGION" --platform managed \
     --no-traffic --tag "$CANDIDATE_TAG" \
     --no-allow-unauthenticated --service-account "$RATING_ENGINE_SA" \
-    --memory=512Mi --port=8080
+    --memory=512Mi --port=8080 \
+    --update-env-vars "RATEGUARD_GIT_SHA=${GIT_SHA},RATEGUARD_IMAGE_DIGEST=${RATING_ENGINE_DIGEST}"
 
   RATING_ENGINE_TAGGED_URL=$(get_tagged_url rateguard-rating-engine)
   if [ -z "$RATING_ENGINE_TAGGED_URL" ]; then
     echo "Error: could not discover the candidate-tagged rateguard-rating-engine URL." >&2
     exit 1
   fi
-  echo "   Candidate rating-engine URL: ${RATING_ENGINE_TAGGED_URL}"
+  echo "   Candidate rating-engine endpoint (tagged, request URL): ${RATING_ENGINE_TAGGED_URL}"
+  # The Google ID-token AUDIENCE is the stable, untagged service URL. Cloud Run
+  # rejects a token minted for a traffic-tagged URL with HTTP 401, so the two
+  # settings are deliberately separate and never derived from one another.
+  RATING_ENGINE_STABLE_URL=$(get_untagged_url rateguard-rating-engine)
+  if [ -z "$RATING_ENGINE_STABLE_URL" ] || [ "$RATING_ENGINE_STABLE_URL" = "$RATING_ENGINE_TAGGED_URL" ]; then
+    echo "Error: could not discover the stable (untagged) rateguard-rating-engine URL for the ID-token audience." >&2
+    exit 1
+  fi
+  echo "   Rating-engine ID-token audience (stable, untagged): ${RATING_ENGINE_STABLE_URL}"
+
+  write_candidate_env_file api "$CANDIDATE_ENV_FILE_API"
+  write_candidate_env_file worker "$CANDIDATE_ENV_FILE_WORKER"
 
   echo "3. Deploying candidate worker (PRIVATE, --no-traffic)..."
   gcloud run deploy rateguard-worker \
@@ -634,10 +658,6 @@ deploy_candidate() {
     --no-traffic --tag "$CANDIDATE_TAG" \
     --no-allow-unauthenticated --service-account "$WORKER_SA" \
     --memory=1Gi --env-vars-file="$CANDIDATE_ENV_FILE_WORKER"
-
-  echo "   Wiring candidate rating-engine connector URL + image digest (deployment provenance) into worker..."
-  gcloud run services update rateguard-worker --region "$REGION" --no-traffic --tag "$CANDIDATE_TAG" \
-    --update-env-vars "RATEGUARD_RATING_ENGINE_CONNECTOR_BASE_URL=${RATING_ENGINE_TAGGED_URL},RATEGUARD_RATING_ENGINE_CONNECTOR_IS_LOCAL_DEV=false,RATEGUARD_RATING_ENGINE_CONNECTOR_AUTH_MODE=google_id_token,RATEGUARD_VENDOR_GATEWAY_CONNECTOR_BASE_URL=${RATING_ENGINE_TAGGED_URL},RATEGUARD_IMAGE_DIGEST=${BACKEND_DIGEST}"
 
   WORKER_TAGGED_URL=$(get_tagged_url rateguard-worker)
   WORKER_UNTAGGED_URL=$(get_untagged_url rateguard-worker)
@@ -668,10 +688,6 @@ deploy_candidate() {
     --no-traffic --tag "$CANDIDATE_TAG" \
     --allow-unauthenticated --service-account "$API_SA" \
     --memory=512Mi --env-vars-file="$CANDIDATE_ENV_FILE_API"
-
-  echo "   Wiring candidate rating-engine connector URL + image digest (deployment provenance) into API..."
-  gcloud run services update rateguard-api --region "$REGION" --no-traffic --tag "$CANDIDATE_TAG" \
-    --update-env-vars "RATEGUARD_RATING_ENGINE_CONNECTOR_BASE_URL=${RATING_ENGINE_TAGGED_URL},RATEGUARD_RATING_ENGINE_CONNECTOR_IS_LOCAL_DEV=false,RATEGUARD_RATING_ENGINE_CONNECTOR_AUTH_MODE=google_id_token,RATEGUARD_VENDOR_GATEWAY_CONNECTOR_BASE_URL=${RATING_ENGINE_TAGGED_URL},RATEGUARD_IMAGE_DIGEST=${BACKEND_DIGEST}"
 
   API_TAGGED_URL=$(get_tagged_url rateguard-api)
   if [ -z "$API_TAGGED_URL" ]; then

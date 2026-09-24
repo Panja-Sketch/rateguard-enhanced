@@ -533,3 +533,60 @@ def test_dlq_poison_delivery_refuses_non_staging_dlq_subscription() -> None:
         )
         == 2
     )
+
+
+# -- explicit connector ID-token audience (candidate endpoint != stable audience) ----------------
+
+
+def _script(name: str) -> str:
+    return (REPO_ROOT / "infrastructure" / name).read_text(encoding="utf-8")
+
+
+def test_candidate_env_files_separate_the_tagged_endpoint_from_the_stable_audience() -> None:
+    text = _script("deploy_candidate_enhanced.sh")
+    block = text.split('cat > "$out" <<ENV\n', 1)[1].split("\nENV\n", 1)[0]
+    assert 'RATEGUARD_RATING_ENGINE_CONNECTOR_BASE_URL: "${RATING_ENGINE_TAGGED_URL}"' in block
+    assert 'RATEGUARD_RATING_ENGINE_CONNECTOR_AUDIENCE: "${RATING_ENGINE_STABLE_URL}"' in block
+    assert 'RATEGUARD_VENDOR_GATEWAY_CONNECTOR_BASE_URL: "${RATING_ENGINE_TAGGED_URL}"' in block
+    assert 'RATEGUARD_VENDOR_GATEWAY_CONNECTOR_AUDIENCE: "${RATING_ENGINE_STABLE_URL}"' in block
+    assert 'RATEGUARD_RATING_ENGINE_CONNECTOR_AUTH_MODE: "google_id_token"' in block
+    assert 'RATEGUARD_RATING_ENGINE_CONNECTOR_IS_LOCAL_DEV: "false"' in block
+    # The audience must never be the tagged URL.
+    assert "AUDIENCE: \"${RATING_ENGINE_TAGGED_URL}\"" not in block
+
+
+def test_candidate_deploy_discovers_the_stable_url_before_writing_the_env_files() -> None:
+    text = _script("deploy_candidate_enhanced.sh")
+    body = text.split("deploy_candidate() {", 1)[1]
+    discover = body.index("RATING_ENGINE_STABLE_URL=$(get_untagged_url rateguard-rating-engine)")
+    assert discover < body.index('write_candidate_env_file api "$CANDIDATE_ENV_FILE_API"')
+    assert discover < body.index("gcloud run deploy rateguard-worker")
+    assert discover < body.index("gcloud run deploy rateguard-api")
+    # A tagged URL is refused as the audience.
+    assert '"$RATING_ENGINE_STABLE_URL" = "$RATING_ENGINE_TAGGED_URL"' in body
+
+
+def test_candidate_engine_deploy_records_provenance_and_stays_private() -> None:
+    text = _script("deploy_candidate_enhanced.sh")
+    body = text.split("deploy_candidate() {", 1)[1]
+    engine_deploy = body.split("gcloud run deploy rateguard-rating-engine", 1)[1].split("RATING_ENGINE_TAGGED_URL=", 1)[0]
+    assert "--no-allow-unauthenticated" in engine_deploy
+    assert "--allow-unauthenticated" not in engine_deploy.replace("--no-allow-unauthenticated", "")
+    assert "RATEGUARD_GIT_SHA=${GIT_SHA}" in engine_deploy and "RATEGUARD_IMAGE_DIGEST=${RATING_ENGINE_DIGEST}" in engine_deploy
+    assert "--service-account \"$RATING_ENGINE_SA\"" in engine_deploy
+    for script in ("deploy_candidate_enhanced.sh", "promote_candidate_to_production.sh"):
+        assert "allUsers" not in _script(script)
+        assert "allAuthenticatedUsers" not in _script(script)
+
+
+def test_promote_sets_the_audience_to_the_stable_url_alongside_the_endpoint() -> None:
+    text = _script("promote_candidate_to_production.sh")
+    assert text.count("RATEGUARD_RATING_ENGINE_CONNECTOR_AUDIENCE=${PROD_RATING_ENGINE_URL}") == 2
+    assert text.count("RATEGUARD_VENDOR_GATEWAY_CONNECTOR_AUDIENCE=${PROD_RATING_ENGINE_URL}") == 2
+    assert 'PROD_RATING_ENGINE_URL="https://rateguard-rating-engine-' in text
+    assert "---" not in text.split("PROD_RATING_ENGINE_URL=", 1)[1].splitlines()[0]
+
+
+def test_engine_cloudbuild_bakes_the_source_commit_into_the_image() -> None:
+    text = (REPO_ROOT / "backend" / "rating_engine" / "cloudbuild.yaml").read_text(encoding="utf-8")
+    assert "ENGINE_SOURCE_COMMIT=${_IMAGE_TAG}" in text

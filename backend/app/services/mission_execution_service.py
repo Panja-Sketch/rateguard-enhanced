@@ -1,4 +1,5 @@
 import logging
+import os
 
 from pydantic import ValidationError
 
@@ -153,6 +154,18 @@ class MissionExecutionService:
 
         meta = record.metadata if isinstance(record.metadata, dict) else {}
         meta["job_type"] = job.job_type
+        # Where this mission actually EXECUTED (the worker), recorded once at
+        # lease time. The evidence bundle is assembled later by whichever API
+        # revision serves the download, so its own environment cannot prove
+        # which worker revision ran the mission (candidate verification relies
+        # on this). Duplicate deliveries return before this point, so the
+        # first execution's provenance is never overwritten.
+        meta["execution_provenance"] = {
+            "git_sha": os.environ.get("RATEGUARD_GIT_SHA"),
+            "image_digest": os.environ.get("RATEGUARD_IMAGE_DIGEST"),
+            "cloud_run_service": os.environ.get("K_SERVICE"),
+            "cloud_run_revision": os.environ.get("K_REVISION"),
+        }
         record.metadata = meta
         try:
             store.update_run(record)

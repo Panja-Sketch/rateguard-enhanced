@@ -18,17 +18,45 @@ tested candidate); commands below are what those scripts run.
 3. **Build + stage candidate** — `deploy_candidate_enhanced.sh --deploy-candidate`: builds the four images
    tagged with the **full git SHA** (never `latest`) and deploys them as `--no-traffic --tag candidate`
    Cloud Run revisions wired to the same production Firestore/GCS/BigQuery resources production already uses.
-4. **Verify candidate** — `deploy_candidate_enhanced.sh --verify-candidate`: creates a SHA-scoped, fully
-   isolated ephemeral verification topic+subscription (never a subscription on the shared production topic,
-   which would fan out to the real production worker too), retargets the candidate API's
-   `RATEGUARD_PUBSUB_TOPIC` at it for the duration of the run, exercises the candidate end to end with a
-   synthetic tenant, and proves the *candidate* worker (not production) processed it via the evidence
-   bundle's `deployment.json.cloud_run_revision`/`git_sha`. The Pub/Sub push OIDC audience is always the
-   worker's **stable, untagged** URL — the proven-working form (see `infrastructure/setup_impact_pubsub.sh`),
-   never a `--tag` URL. Cleanup (ephemeral topic/subscription deletion + restoring the candidate API's
-   production topic) always runs, success or failure, and never deletes the acceptance evidence. Once the
-   manual/CI checks pass, run `deploy_candidate_enhanced.sh --record-verified` to resolve and pin the
-   verified image digests (`infrastructure/.candidate-verified/<sha>.evidence`).
+4. **Verify candidate** — an explicit three-step lifecycle (`deploy_candidate_enhanced.sh`), all guarded by the
+   clean-tree / pushed-HEAD / project checks. Run it from the repo root at the candidate's commit, with operator
+   Application Default Credentials (`gcloud auth application-default login`) and the backend dependencies
+   installed (set `VERIFY_PYTHON` to the backend venv's interpreter if needed). Never paste a password or token
+   into a terminal; the scripts neither read nor store one.
+   1. `--prepare-verification` — confirms all four candidate revisions exist at 0 % traffic and differ from
+      production; records the production revisions and the **byte-for-byte** live configuration of
+      `assurance-runs-worker-sub` and `impact-batches-worker-sub`; writes the local pending-state file
+      `infrastructure/.candidate-verified/<sha>.pending.json` (names, revisions, SHA, digests, URLs, original
+      env values — no credentials) **before** the first change; creates SHA-scoped **mission**
+      (`assurance-runs-candidate-verify-<sha12>`) and **impact** (`impact-batches-candidate-verify-<sha12>`)
+      topics + push subscriptions, each pushing only to the candidate worker's own route
+      (`/internal/pubsub/assurance`, `/internal/pubsub/impact-batch`) with the worker's **stable, untagged** URL
+      as OIDC audience; points the candidate API (`RATEGUARD_PUBSUB_TOPIC`, `RATEGUARD_IMPACT_TOPIC`) and worker
+      (`RATEGUARD_IMPACT_TOPIC`) at those topics only; then records the **final** candidate worker revision.
+      Neither production topic is ever published to or subscribed to, so a production worker can never receive a
+      candidate mission or impact batch. On any failure or signal it restores and deletes everything itself; on
+      success it leaves the environment in place and prints the candidate web URL and instructions.
+   2. **Observed manual mission** — in the candidate web URL, signed in with the usual demo-tenant account, create
+      a mission named `[CANDIDATE-VERIFY-<sha12>] controlled workbook vs versioned REST connector` (Source A: a
+      controlled workbook; Source B: the versioned REST connector with an explicit engine version) and wait for
+      a terminal decision. QUEUED/RUNNING/202 is not success.
+   3. `--complete-verification --mission-id=<MIS-…>` — requires the pending-state file. Verifies the mission
+      reached a completed decision and carries the synthetic marker; retrieves the evidence bundle with
+      operator ADC and validates it (`deployment.json.cloud_run_revision` = the recorded candidate worker
+      revision and ≠ production, `git_sha` = the full SHA, image digest, controlled-workbook + versioned REST
+      connector provenance, manifest hashes); publishes the same job envelope twice to the isolated mission
+      topic and confirms one terminal decision and unchanged evidence; confirms both production subscriptions
+      are byte-for-byte unchanged; restores the candidate env; deletes the temporary resources; pins all four
+      image digests in `<sha>.evidence`; only then clears the pending file. Any failed check exits non-zero,
+      writes no evidence and leaves the isolated environment in place (fix and re-run, or abort).
+   4. `--abort-verification` — idempotent restore + delete from the pending state (already-absent resources are
+      fine; only the SHA-scoped names derived from the commit are ever deleted). Firestore/GCS acceptance
+      evidence is preserved. It records `<sha>.aborted`, which makes promotion of that SHA refuse until a new
+      prepare/complete succeeds.
+   Then run `--record-verified`: it works **only** after `--complete-verification` succeeded (and refuses while a
+   verification is pending or aborted, or if the candidate has moved off the pinned digests).
+   `promote_candidate_to_production.sh` also refuses a pending or aborted verification — even with
+   `--skip-verification-check`.
 5. **Promote** — `promote_candidate_to_production.sh --promote`: refuses to proceed unless the
    candidate-tagged revisions still match the pinned verified digests, reuses those exact digests
    unchanged (no rebuild, including web), repoints worker/api at the production Pub/Sub topic, the

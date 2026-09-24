@@ -11,9 +11,11 @@
 # and the locked doc's tenant model); this script does NOT provision a
 # second, parallel staging data plane. The one thing this script deliberately
 # never does automatically is point any part of the real Pub/Sub message flow
-# at a candidate-tagged URL -- that is the job of `--verify-candidate` below,
-# which uses its own disposable, auto-restoring subscription instead of
-# touching the real one.
+# at a candidate-tagged URL -- that is the job of the three-step verification
+# lifecycle below (--prepare-verification, then an OBSERVED manual mission,
+# then --complete-verification, or --abort-verification), which uses its own
+# disposable, SHA-scoped mission AND impact topics/subscriptions and restores
+# every candidate setting it changed.
 #
 # THIS SCRIPT WAS PREVIOUSLY WRONG: an earlier version of this file claimed
 # "this project currently has ZERO deployed Cloud Run services" and pointed
@@ -30,8 +32,9 @@
 # SAFETY: by default (no flag) this performs only READ-ONLY discovery calls
 # (gcloud run/pubsub/... *list*/*describe*, never create/update/delete) and
 # prints the full plan. Nothing here ever modifies production traffic or
-# creates/deletes any resource unless --deploy-candidate or
-# --verify-candidate is passed.
+# creates/deletes any resource unless --deploy-candidate,
+# --prepare-verification, --complete-verification or --abort-verification is
+# passed.
 
 set -euo pipefail
 
@@ -69,6 +72,7 @@ PROD_BIGQUERY_RESULTS_TABLE="portfolio_exposure_results"
 PROD_PUBSUB_TOPIC="assurance-runs"
 PROD_PUBSUB_SUBSCRIPTION="assurance-runs-worker-sub"
 PROD_IMPACT_TOPIC="impact-batches"
+PROD_IMPACT_SUBSCRIPTION="impact-batches-worker-sub"
 
 # Resource-name prefixes that must NEVER be provisioned by this script again
 # (leftover from the earlier, wrong staging-isolation design). Used by
@@ -76,36 +80,32 @@ PROD_IMPACT_TOPIC="impact-batches"
 # never reintroduces them.
 OBSOLETE_STAGING_NAMES="assurance-runs-staging assurance-worker-staging assurance-runs-staging-dlq assurance-runs-staging-dlq-inspect assurance_runs_staging rateguard_staging rateguard-enhanced-artifacts-staging"
 
-# Consumed by promote_candidate_to_production.sh's require_verified_marker --
-# a file named after the full git SHA existing here is what "this candidate
-# passed --verify-candidate" means to the promotion script. Alongside it,
-# record_verified() writes "${GIT_SHA}.evidence" (structured: verified image
-# digests + candidate revision names + mission id) which promotion uses to
-# pin and cross-check that it is promoting the EXACT digests that were
-# actually verified, not whatever happens to be under the movable
-# `candidate` tag at promotion time. Neither file is deleted by cleanup --
+# Consumed by promote_candidate_to_production.sh's require_verified_marker.
+# Per full git SHA, in this directory (git-ignored, local, credential-free):
+#   <sha>.pending.json  a verification is PREPARED (temporary topics/env in place)
+#                       -- promotion refuses while it exists
+#   <sha>.aborted       the verification was aborted -- promotion refuses
+#   <sha>.evidence      written ONLY by --complete-verification: pinned digests of
+#                       all four verified images + revisions + mission id, with
+#                       VERIFICATION_COMPLETE=true
+#   <sha>               written ONLY by --record-verified, and only when the
+#                       evidence above exists and nothing is pending/aborted
+# None of these is deleted by cleanup of the temporary Pub/Sub resources --
 # audit evidence must survive ephemeral-resource cleanup.
 VERIFIED_MARKER_DIR="infrastructure/.candidate-verified"
 
-# A SHA-scoped, fully ISOLATED verification topic+subscription used only by
-# `--verify-candidate` (see verify_candidate_async_path below) -- NEVER a
-# subscription on the real production topic. An earlier version of this
-# script created a disposable *subscription* on the EXISTING PRODUCTION
-# TOPIC (assurance-runs); because Pub/Sub fan-out delivers one copy of every
-# message to EVERY subscription on a topic, that meant the real
-# assurance-runs-worker-sub subscription (i.e. the PRODUCTION worker) also
-# received every candidate verification message, racing the candidate
-# worker to process it and proving nothing about which one actually did.
-# The candidate API's own RATEGUARD_PUBSUB_TOPIC env var is retargeted at
-# this topic for the duration of verification (see verify_candidate_async_path)
-# so a verification mission is never published to the production topic at
-# all -- not merely delivered to an extra subscription on it.
+# SHA-scoped, fully ISOLATED verification topics/subscriptions (see the
+# lifecycle comment further down). An earlier version created a disposable
+# *subscription* on the production topic (assurance-runs); Pub/Sub fan-out then
+# delivered every candidate message to the real production worker too. Neither
+# production topic (assurance-runs, impact-batches) may ever be published to or
+# subscribed to by candidate verification.
 VERIFY_TOPIC_PREFIX="assurance-runs-candidate-verify"
+VERIFY_IMPACT_TOPIC_PREFIX="impact-batches-candidate-verify"
 VERIFY_SUBSCRIPTION_SUFFIX="-sub"
-# The synthetic tenant/idempotency-key prefix verification missions use --
-# never a real customer tenant, always grep-able in Firestore/logs as
-# obviously synthetic.
-VERIFY_TENANT="candidate-verify-tenant"
+
+# Operator-side checker (ADC only; never reads a token) run by --complete-verification.
+HELPER_SCRIPT="backend/scripts/verify_candidate_mission.py"
 
 GIT_SHA="$(git rev-parse HEAD 2>/dev/null || echo '')"
 if [ -z "$GIT_SHA" ]; then
@@ -113,6 +113,8 @@ if [ -z "$GIT_SHA" ]; then
   exit 1
 fi
 IMAGE_TAG="candidate-${GIT_SHA}"
+# All relative paths below (marker dir, env files, helper) are repo-root relative.
+cd "$(git rev-parse --show-toplevel)"
 
 RATING_ENGINE_IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${ARTIFACT_REPO}/rateguard-rating-engine:${IMAGE_TAG}"
 WEB_IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${ARTIFACT_REPO}/rateguard-web:${IMAGE_TAG}"
@@ -135,30 +137,79 @@ BACKEND_IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${ARTIFACT_REPO}/rateguard
 CANDIDATE_ENV_FILE_API="infrastructure/.candidate-enhanced-env-api.yaml"
 CANDIDATE_ENV_FILE_WORKER="infrastructure/.candidate-enhanced-env-worker.yaml"
 
+PY=python3
+if ! "$PY" -c "" >/dev/null 2>&1; then PY=python; fi
+HELPER_PYTHON="${VERIFY_PYTHON:-$PY}"
+
+PENDING_STATE_FILE="${VERIFIED_MARKER_DIR}/${GIT_SHA}.pending.json"
+ABORTED_MARKER="${VERIFIED_MARKER_DIR}/${GIT_SHA}.aborted"
+PROD_SUBS_DIR="${VERIFIED_MARKER_DIR}/${GIT_SHA}.prod-subs"
+
+# Trap-state and lifecycle variables: ALL initialised here, at top level,
+# BEFORE any trap is installed, so an EXIT trap can never hit an unbound
+# variable under `set -u` (the original defect: a function-local flag read by
+# an EXIT trap after that function had returned).
+PREPARE_ARMED=false
+CLEANUP_DONE=false
+MISSION_ID=""
+MISSION_TOPIC=""
+MISSION_SUB=""
+IMPACT_VERIFY_TOPIC=""
+IMPACT_VERIFY_SUB=""
+
+usage() {
+  echo "Usage: $0 [--deploy-candidate | --prepare-verification | --complete-verification --mission-id=<ID> | --abort-verification | --record-verified]"
+  echo "  (no flag)                 Discover current production state and print the full plan. Read-only."
+  echo "  --deploy-candidate        Build and deploy the candidate revisions (--no-traffic)."
+  echo "  --prepare-verification    Create SHA-scoped temporary mission + impact topics/subscriptions, point the"
+  echo "                            candidate publishers ONLY at them, and leave the environment in place for one"
+  echo "                            observed manual mission. Restores everything itself on failure or signal."
+  echo "  --complete-verification --mission-id=<ID>"
+  echo "                            Check the finished mission + evidence bundle, prove duplicate delivery is"
+  echo "                            harmless, restore + delete the temporary environment, pin verified digests."
+  echo "  --abort-verification      Idempotently restore the candidate environment and delete the temporary"
+  echo "                            resources. Evidence in Firestore/GCS is preserved."
+  echo "  --record-verified         Run ONLY after --complete-verification succeeded -- writes the marker"
+  echo "                            promote_candidate_to_production.sh requires."
+}
+
 MODE=""
+set_mode() {
+  if [ -n "$MODE" ] && [ "$MODE" != "$1" ]; then
+    echo "Error: only one mode flag may be given (already '${MODE}', got '$1')." >&2
+    exit 2
+  fi
+  MODE="$1"
+}
 for arg in "$@"; do
   case "$arg" in
-    --deploy-candidate) MODE="deploy" ;;
-    --verify-candidate) MODE="verify" ;;
-    --record-verified) MODE="record-verified" ;;
-    --help|-h)
-      echo "Usage: $0 [--deploy-candidate | --verify-candidate | --record-verified]"
-      echo "  (no flag)           Discover current production state and print the full plan. Read-only."
-      echo "  --deploy-candidate  Build and deploy the candidate revisions (--no-traffic)."
-      echo "  --verify-candidate  Exercise an already-deployed candidate's async worker path"
-      echo "                      end-to-end using a disposable, auto-restoring Pub/Sub"
-      echo "                      subscription and a synthetic verification tenant. Never"
-      echo "                      touches the real production subscription. Prints manual/CI"
-      echo "                      steps 3-4 for a human or pipeline to execute and confirm."
-      echo "  --record-verified   Run ONLY after steps 3-4 above were confirmed successful --"
-      echo "                      writes the marker promote_candidate_to_production.sh requires."
-      exit 0
+    --deploy-candidate) set_mode deploy ;;
+    --prepare-verification) set_mode prepare ;;
+    --complete-verification) set_mode complete ;;
+    --abort-verification) set_mode abort ;;
+    --record-verified) set_mode record-verified ;;
+    --mission-id=*) MISSION_ID="${arg#--mission-id=}" ;;
+    --verify-candidate)
+      echo "Error: --verify-candidate was replaced by the explicit lifecycle" >&2
+      echo "  --prepare-verification / --complete-verification --mission-id=<ID> / --abort-verification." >&2
+      exit 2
       ;;
+    --help|-h) usage; exit 0 ;;
+    *) echo "Error: unknown argument '${arg}'." >&2; usage >&2; exit 2 ;;
   esac
 done
+if [ -n "$MISSION_ID" ] && ! [[ "$MISSION_ID" =~ ^MIS-[0-9A-F]{8}$ ]]; then
+  echo "Error: --mission-id must look like MIS-1A2B3C4D." >&2
+  exit 2
+fi
+if [ -n "$MISSION_ID" ] && [ "$MODE" != "complete" ]; then
+  echo "Error: --mission-id is only valid with --complete-verification." >&2
+  exit 2
+fi
 
-# --- Preflight guards (checked before ANY mutating action; --deploy-candidate
-# and --verify-candidate both go through this). ---
+# --- Preflight guards (checked before ANY mutating action; --deploy-candidate,
+# --prepare-verification, --complete-verification and --abort-verification all
+# go through this). ---
 preflight_guards() {
   local configured_project
   configured_project="$(gcloud config get-value project 2>/dev/null || true)"
@@ -246,7 +297,7 @@ Service accounts (per-service, distinct):
 
 Production data plane these candidates are wired to (pre-existing, never
 provisioned by this script -- candidate revisions receive 0% traffic, so
-nothing here is reachable by real users; only an explicit --verify-candidate
+nothing here is reachable by real users; only an explicit --prepare-verification
 run or manual testing against the candidate-tagged URL touches it):
   Firestore collection: ${PROD_FIRESTORE_COLLECTION}
   GCS bucket:            ${PROD_GCS_BUCKET}
@@ -260,7 +311,8 @@ resources (${OBSOLETE_STAGING_NAMES}) may still exist from a prior version of
 this script; they are not deleted here (destructive deletion is out of
 scope for this script) but are never recreated.
 
-Preflight guards --deploy-candidate/--verify-candidate enforce before any
+Preflight guards every mutating mode (--deploy-candidate and the three
+verification modes) enforce before any
 mutating call:
   - gcloud must be configured for project ${PROJECT_ID} (checked via
     'gcloud config get-value project').
@@ -333,7 +385,7 @@ Exact commands --deploy-candidate would run, in order:
   but Cloud Run's proven-working OIDC audience form (see
   infrastructure/setup_impact_pubsub.sh, the live impact-batches
   subscription) is always the service's STABLE, untagged base URL --
-  never a --tag URL. --verify-candidate below uses the stable worker URL
+  never a --tag URL. --prepare-verification below uses the stable worker URL
   as the push-auth-token-audience for exactly this reason.
 
   5b) Point the API CORS allowlist at the candidate web origin (exactly one
@@ -344,53 +396,53 @@ Exact commands --deploy-candidate would run, in order:
      revision); confirmation that no unauthenticated invoker binding exists
      on worker or rating-engine.
 
---verify-candidate (run separately, after --deploy-candidate, against an
-already-deployed candidate) would -- CANDIDATE RESOURCES / CLEANUP PLAN:
-  1) Record the real ${PROD_PUBSUB_SUBSCRIPTION} state as the "before" state
-     (never modified) and the candidate worker's revision name (the
-     acceptance-evidence baseline every later check is compared against).
-  2) Create an ISOLATED, SHA-scoped verification topic
-     ${VERIFY_TOPIC_PREFIX}-<short-sha> and subscription
-     <that-topic>${VERIFY_SUBSCRIPTION_SUFFIX} -- NEVER a subscription on the
-     shared production topic ${PROD_PUBSUB_TOPIC} (Pub/Sub fan-out would also
-     deliver every verification message to the real production worker and
-     race it -- this is the fix for the fan-out defect this replaces).
-     Push endpoint: the candidate-tagged worker URL (routes to this specific
-     candidate revision). OIDC audience: the STABLE, untagged worker URL --
-     the proven-working form (see infrastructure/setup_impact_pubsub.sh),
-     never the --tag URL.
-  3) Retarget the candidate API's (still --no-traffic, --tag ${CANDIDATE_TAG}
-     only) RATEGUARD_PUBSUB_TOPIC at the isolated verification topic, so a
-     verification mission is never published to production's
-     ${PROD_PUBSUB_TOPIC} at all -- not merely delivered to an extra
-     subscription on it.
-  4) Create a mission through the candidate-tagged API using the synthetic,
-     clearly-marked tenant '${VERIFY_TENANT}', with a fixed idempotency key,
-     and poll it to a terminal state (never treats 202/QUEUED as success).
-     Proof the CANDIDATE worker (not production) processed it: the
-     downloaded evidence bundle's deployment.json.cloud_run_revision must
-     equal the candidate worker revision recorded in step 1 (and differ from
-     the current production worker revision), and its git_sha must equal
-     the full SHA being verified.
-  5) Publish the identical idempotency key a second time (into the isolated
-     topic, still never production) and confirm exactly one terminal
-     mission/decision exists (duplicate-delivery / idempotency check).
-  6) Unconditionally (success or failure path): restore the candidate API's
-     RATEGUARD_PUBSUB_TOPIC to ${PROD_PUBSUB_TOPIC}, delete the ephemeral
-     verification topic+subscription, and confirm
-     ${PROD_PUBSUB_SUBSCRIPTION}'s state is byte-for-byte unchanged from the
-     "before" state captured in step 1. If that confirmation fails, this
-     exits non-zero with an explicit "treat production Pub/Sub as SUSPECT"
-     warning rather than continuing silently. This cleanup never deletes the
-     acceptance evidence itself (Firestore/GCS mission data, or the verified
-     marker/evidence file --record-verified writes), only the ephemeral
-     Pub/Sub resources created in step 2.
+Candidate verification is an explicit THREE-STEP lifecycle (run after
+--deploy-candidate, against the already-deployed 0%-traffic candidate):
 
---record-verified (run only after the checks in step 4/5 above are manually
-confirmed) resolves and pins the VERIFIED DIGESTS of all four
-candidate-tagged revisions into infrastructure/.candidate-verified/<sha>.evidence
--- this is what lets promote_candidate_to_production.sh refuse to promote if
-the \`candidate\` tag has since moved to a different, unverified deployment.
+--prepare-verification
+  1) Confirm all four candidate revisions exist at 0% traffic and differ from
+     production; record the production revisions and the LIVE, byte-for-byte
+     configuration of ${PROD_PUBSUB_SUBSCRIPTION} and ${PROD_IMPACT_SUBSCRIPTION}.
+  2) Write the pending-state file (infrastructure/.candidate-verified/<sha>.pending.json:
+     names, revisions, SHA, digests, URLs, ORIGINAL candidate env values -- never a
+     credential) BEFORE the first mutation.
+  3) Create the ISOLATED, SHA-scoped topics + push subscriptions
+       mission: ${VERIFY_TOPIC_PREFIX}-<sha12>  -> <candidate worker>/internal/pubsub/assurance
+       impact:  ${VERIFY_IMPACT_TOPIC_PREFIX}-<sha12> -> <candidate worker>/internal/pubsub/impact-batch
+     OIDC audience = the STABLE, untagged worker URL (never a --tag URL). Neither
+     production topic (${PROD_PUBSUB_TOPIC}, ${PROD_IMPACT_TOPIC}) is published to or
+     subscribed to, so no production worker can ever receive a candidate mission
+     or a candidate impact batch.
+  4) Point the candidate API's RATEGUARD_PUBSUB_TOPIC/RATEGUARD_IMPACT_TOPIC and
+     the candidate worker's RATEGUARD_IMPACT_TOPIC at the temporary topics only,
+     then record the FINAL candidate worker revision.
+  5) On ANY failure or signal: restore everything and delete the temporary
+     resources. On success: leave the environment in place and print the candidate
+     web URL plus instructions for one observed, synthetic
+     controlled-workbook-versus-versioned-REST-connector mission.
+
+--complete-verification --mission-id=<ID>   (requires the pending-state file)
+  Verify the mission reached a terminal decision (QUEUED/RUNNING/202 is not
+  success); validate the evidence bundle (operator ADC, no token): deployment.json
+  cloud_run_revision == the recorded candidate worker revision and != production,
+  git_sha == the full SHA, controlled-workbook + versioned REST connector
+  provenance; publish the same job envelope twice to the isolated mission topic
+  and confirm one terminal decision and unchanged evidence; confirm both
+  production subscriptions are unchanged; restore the candidate env; delete the
+  temporary resources; pin all four verified digests into
+  infrastructure/.candidate-verified/<sha>.evidence; clear the pending state.
+  Any failed check exits non-zero and refuses promotion.
+
+--abort-verification
+  Idempotently restore the candidate env from the pending-state file, delete
+  ONLY the SHA-scoped temporary resources (already-absent ones are fine),
+  confirm the production subscriptions are unchanged, preserve all Firestore/GCS
+  evidence, and clear the pending state.
+
+--record-verified (only after --complete-verification succeeded) writes the marker
+promote_candidate_to_production.sh requires. Promotion refuses a pending or
+aborted verification, and refuses if the candidate tag has moved off the pinned
+digests.
 
 NOT done by this script, ever:
   - No production traffic change ('gcloud run services update-traffic').
@@ -402,15 +454,15 @@ NOT done by this script, ever:
   - No staging Pub/Sub topic/subscription/Firestore collection/BigQuery
     dataset/GCS bucket creation.
   - No modification of the real ${PROD_PUBSUB_SUBSCRIPTION} push config.
-  - No subscription ever created on the shared production topic
-    ${PROD_PUBSUB_TOPIC} -- verification uses its own isolated, SHA-scoped
-    topic, so no candidate-verification message can ever reach the real
-    production worker via Pub/Sub fan-out.
+  - No subscription ever created on, and nothing ever published to, the shared
+    production topics ${PROD_PUBSUB_TOPIC} / ${PROD_IMPACT_TOPIC} -- verification
+    uses its own isolated, SHA-scoped mission and impact topics, so no candidate
+    mission or impact batch can ever reach a production worker via Pub/Sub fan-out.
   - No deploy to, or read/write of, the old 'rateguard-ai' project.
 
 Re-run this plan any time with no arguments (read-only). Pass
---deploy-candidate to build+deploy, or --verify-candidate (after a candidate
-already exists) to exercise its async path safely.
+--deploy-candidate to build+deploy, or --prepare-verification (after a candidate
+already exists) to begin verifying its async path safely.
 PLAN
 }
 
@@ -456,8 +508,8 @@ RATEGUARD_RATE_LIMITS: '{"connector_test":"5/3600","mission_create":"10/3600","s
 RATEGUARD_CORS_ORIGINS: '["http://localhost:3000"]'
 ENV
   # Deliberately does NOT set RATEGUARD_PUBSUB_SUBSCRIPTION: the candidate
-  # worker never subscribes to anything until --verify-candidate creates its
-  # own disposable subscription and passes its name explicitly (see below) --
+  # worker never subscribes to anything until --prepare-verification creates its
+  # own disposable subscriptions (see below) --
   # this is what guarantees the candidate never receives live production
   # Pub/Sub traffic just by existing.
 }
@@ -674,17 +726,34 @@ deploy_candidate() {
   echo "Candidate API URL:           ${API_TAGGED_URL}"
   echo "Candidate web URL:           ${WEB_TAGGED_URL}"
   echo ""
-  echo "Next: run '$0 --verify-candidate' to exercise the async worker path"
+  echo "Next: run '$0 --prepare-verification' to begin verifying the async worker path"
   echo "before promoting (infrastructure/promote_candidate_to_production.sh)."
   echo "========================================================"
 }
 
-# --- Candidate async-worker verification: publishes ONLY to a SHA-scoped,
-# fully isolated ephemeral topic+subscription (never a subscription on the
-# shared production topic -- Pub/Sub fan-out would also deliver to the real
-# assurance-runs-worker-sub / production worker and race it), always cleans
-# up the ephemeral Pub/Sub resources, and fails loudly (never silently) if
-# cleanup does not verify. ---
+# --- Candidate verification lifecycle -------------------------------------
+#
+#   --prepare-verification   creates the SHA-scoped, fully isolated temporary
+#                            environment and LEAVES IT IN PLACE for an observed,
+#                            manual mission run (it fails closed: on any error
+#                            or signal it restores everything itself).
+#   --complete-verification  checks the finished mission, proves duplicate
+#                            delivery is harmless, restores + deletes, and only
+#                            then pins the verified digests.
+#   --abort-verification     idempotent restore + delete from the pending state.
+#
+# Two ISOLATED topic/subscription pairs exist for the duration:
+#   mission: assurance-runs-candidate-verify-<sha12>  -> candidate worker /internal/pubsub/assurance
+#   impact:  impact-batches-candidate-verify-<sha12>  -> candidate worker /internal/pubsub/impact-batch
+# Pub/Sub fan-out delivers every message to EVERY subscription on a topic, so
+# neither production topic (assurance-runs, impact-batches) is ever published
+# to and no subscription is ever added to one: the production workers can never
+# receive a candidate mission or a candidate impact batch.
+#
+# A pending-state file (infrastructure/.candidate-verified/<sha>.pending.json,
+# git-ignored, local, no credentials) is the single source of truth for what to
+# restore. It is written BEFORE the first mutation.
+
 tagged_revision_name() {
   # Args: <service>. The revision name currently under --tag candidate.
   gcloud run services describe "$1" --region "$REGION" --format="value(status.traffic)" 2>/dev/null \
@@ -697,190 +766,629 @@ prod_revision_name() {
     | tr ';' '\n' | grep "'percent': 100" | sed -E "s/.*'revisionName': '([^']+)'.*/\1/"
 }
 
-verify_candidate_async_path() {
+candidate_traffic_percent() {
+  # Args: <service>. Traffic percent of the candidate-tagged entry (empty == 0).
+  gcloud run services describe "$1" --region "$REGION" --format="value(status.traffic)" 2>/dev/null \
+    | tr ';' '\n' | grep "'tag': '${CANDIDATE_TAG}'" | sed -nE "s/.*'percent': ([0-9]+).*/\1/p" | head -n1
+}
+
+service_env_value() {
+  # Args: <service> <env var>. Prints the value on the service's current
+  # template, or __UNSET__. Never prints anything else from the service.
+  gcloud run services describe "$1" --region "$REGION" --format=json 2>/dev/null | "$PY" -c '
+import json, sys
+name = sys.argv[1]
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    sys.exit(3)
+containers = data.get("spec", {}).get("template", {}).get("spec", {}).get("containers") or [{}]
+for entry in containers[0].get("env") or []:
+    if entry.get("name") == name:
+        print(entry.get("value", ""))
+        break
+else:
+    print("__UNSET__")
+' "$2" | tr -d '\r'
+}
+
+set_candidate_env() {
+  # Args: <service> <KEY=VALUE>... (VALUE __UNSET__ removes the variable). Only
+  # ever targets the --no-traffic candidate-tagged revision line.
+  local svc="$1"; shift
+  local set_args="" remove_args="" pair key val
+  for pair in "$@"; do
+    key="${pair%%=*}"
+    val="${pair#*=}"
+    if [ "$val" = "__UNSET__" ]; then
+      remove_args="${remove_args:+${remove_args},}${key}"
+    else
+      set_args="${set_args:+${set_args},}${key}=${val}"
+    fi
+  done
+  local args=(run services update "$svc" --region "$REGION" --no-traffic --tag "$CANDIDATE_TAG")
+  if [ -n "$set_args" ]; then args+=(--update-env-vars "$set_args"); fi
+  if [ -n "$remove_args" ]; then args+=(--remove-env-vars "$remove_args"); fi
+  gcloud "${args[@]}" >/dev/null
+}
+
+state_set() {
+  # Args: <file> <key=value>... Merges string values into a JSON object file.
+  "$PY" - "$@" <<'PYEOF'
+import json, os, sys
+path, pairs = sys.argv[1], sys.argv[2:]
+try:
+    with open(path, encoding="utf-8") as fh:
+        data = json.load(fh)
+except FileNotFoundError:
+    data = {}
+for pair in pairs:
+    key, _, value = pair.partition("=")
+    data[key] = value
+tmp = path + ".tmp"
+with open(tmp, "w", encoding="utf-8", newline="\n") as fh:
+    json.dump(data, fh, indent=2, sort_keys=True)
+    fh.write("\n")
+os.replace(tmp, path)
+PYEOF
+}
+
+state_get() {
+  # Args: <file> <key>. Prints the value ('' when absent).
+  "$PY" -c '
+import json, sys
+try:
+    with open(sys.argv[1], encoding="utf-8") as fh:
+        value = json.load(fh).get(sys.argv[2])
+except Exception:
+    sys.exit(3)
+print("" if value is None else value)
+' "$1" "$2" | tr -d '\r'
+}
+
+kv_get() {
+  # Args: <KEY=VALUE file> <key>.
+  grep -E "^${2}=" "$1" | head -n1 | cut -d= -f2- | tr -d '\r' || true
+}
+
+derive_temp_names() {
+  local short="${GIT_SHA:0:12}"
+  MISSION_TOPIC="${VERIFY_TOPIC_PREFIX}-${short}"
+  MISSION_SUB="${MISSION_TOPIC}${VERIFY_SUBSCRIPTION_SUFFIX}"
+  IMPACT_VERIFY_TOPIC="${VERIFY_IMPACT_TOPIC_PREFIX}-${short}"
+  IMPACT_VERIFY_SUB="${IMPACT_VERIFY_TOPIC}${VERIFY_SUBSCRIPTION_SUFFIX}"
+  local n
+  for n in "$MISSION_TOPIC" "$MISSION_SUB" "$IMPACT_VERIFY_TOPIC" "$IMPACT_VERIFY_SUB"; do
+    refuse_staging_named_resource "$n"
+  done
+}
+
+assert_state_matches_derived_names() {
+  # The state file is never trusted to name what gets DELETED: every name in it
+  # must equal the one derived from this checkout's SHA.
+  local field expected
+  for field in "git_sha:${GIT_SHA}" "mission_topic:${MISSION_TOPIC}" "mission_subscription:${MISSION_SUB}" \
+               "impact_topic:${IMPACT_VERIFY_TOPIC}" "impact_subscription:${IMPACT_VERIFY_SUB}"; do
+    expected="${field#*:}"
+    if [ "$(state_get "$PENDING_STATE_FILE" "${field%%:*}")" != "$expected" ]; then
+      echo "Error: pending state ${PENDING_STATE_FILE} field '${field%%:*}' does not match the value derived from" >&2
+      echo "the current commit (${expected}). Refusing to act on it -- check out the SHA it was prepared at." >&2
+      return 1
+    fi
+  done
+}
+
+snapshot_prod_subscriptions() {
+  # Byte-for-byte copies of the LIVE production subscription configs.
+  local sub
+  mkdir -p "$PROD_SUBS_DIR"
+  for sub in "$PROD_PUBSUB_SUBSCRIPTION" "$PROD_IMPACT_SUBSCRIPTION"; do
+    gcloud pubsub subscriptions describe "$sub" --format=json > "${PROD_SUBS_DIR}/${sub}.json"
+    if [ ! -s "${PROD_SUBS_DIR}/${sub}.json" ]; then
+      echo "Error: could not record the production subscription ${sub}." >&2
+      return 1
+    fi
+  done
+}
+
+confirm_prod_subscriptions_unchanged() {
+  local sub rc=0
+  for sub in "$PROD_PUBSUB_SUBSCRIPTION" "$PROD_IMPACT_SUBSCRIPTION"; do
+    if [ ! -f "${PROD_SUBS_DIR}/${sub}.json" ]; then
+      echo "Error: no recorded copy of ${sub} in ${PROD_SUBS_DIR}; cannot confirm it is unchanged." >&2
+      rc=1
+    elif cmp -s "${PROD_SUBS_DIR}/${sub}.json" <(gcloud pubsub subscriptions describe "$sub" --format=json); then
+      echo "   Confirmed: production subscription ${sub} is byte-for-byte unchanged."
+    else
+      echo "Error: production subscription ${sub} CHANGED during verification. Treat production Pub/Sub" >&2
+      echo "routing as SUSPECT and investigate before promoting anything." >&2
+      rc=1
+    fi
+  done
+  return "$rc"
+}
+
+restore_service_env() {
+  # Args: <service> <ENV_KEY:state-field>... Restores only values that differ.
+  local svc="$1"; shift
+  local spec key field orig cur
+  local pairs=()
+  for spec in "$@"; do
+    key="${spec%%:*}"
+    field="${spec#*:}"
+    orig="$(state_get "$PENDING_STATE_FILE" "$field")" || orig=""
+    if [ -z "$orig" ]; then
+      echo "Error: pending state has no original value for ${svc} ${key}." >&2
+      return 1
+    fi
+    cur="$(service_env_value "$svc" "$key")" || { echo "Error: cannot read ${svc} ${key}." >&2; return 1; }
+    if [ "$cur" != "$orig" ]; then pairs+=("${key}=${orig}"); fi
+  done
+  if [ "${#pairs[@]}" -eq 0 ]; then
+    echo "   ${svc}: environment already at its original values."
+    return 0
+  fi
+  echo "   ${svc}: restoring ${pairs[*]}"
+  set_candidate_env "$svc" "${pairs[@]}"
+}
+
+delete_temp_resource() {
+  # Args: <topics|subscriptions> <name>. Only ever called with derived, SHA-scoped names.
+  local kind="$1" name="$2"
+  if gcloud pubsub "$kind" describe "$name" >/dev/null 2>&1; then
+    if gcloud pubsub "$kind" delete "$name" >/dev/null; then
+      echo "   deleted ${kind%s} ${name}"
+    else
+      echo "Error: failed to delete ${kind%s} ${name}. MANUAL CLEANUP REQUIRED: gcloud pubsub ${kind} delete ${name}" >&2
+      return 1
+    fi
+  else
+    echo "   ${kind%s} ${name}: already absent."
+  fi
+}
+
+teardown_verification_environment() {
+  # Shared by --abort-verification, --complete-verification and prepare
+  # failure/signal handling. Attempts EVERY step; returns nonzero if any failed.
+  # Never touches Firestore/GCS evidence, only the candidate env + temp topics/subs.
+  local rc=0
+  echo "Restoring the candidate API/worker environment to its recorded original values..."
+  restore_service_env rateguard-api "RATEGUARD_PUBSUB_TOPIC:original_api_pubsub_topic" \
+    "RATEGUARD_IMPACT_TOPIC:original_api_impact_topic" || rc=1
+  restore_service_env rateguard-worker "RATEGUARD_IMPACT_TOPIC:original_worker_impact_topic" || rc=1
+  echo "Deleting the SHA-scoped temporary subscriptions and topics (acceptance evidence is never touched)..."
+  delete_temp_resource subscriptions "$MISSION_SUB" || rc=1
+  delete_temp_resource subscriptions "$IMPACT_VERIFY_SUB" || rc=1
+  delete_temp_resource topics "$MISSION_TOPIC" || rc=1
+  delete_temp_resource topics "$IMPACT_VERIFY_TOPIC" || rc=1
+  echo "Confirming the production subscriptions are byte-for-byte unchanged..."
+  confirm_prod_subscriptions_unchanged || rc=1
+  return "$rc"
+}
+
+clear_pending_state() {
+  rm -f "$PENDING_STATE_FILE" "${PENDING_STATE_FILE}.tmp"
+  rm -rf "$PROD_SUBS_DIR"
+}
+
+on_prepare_exit() {
+  local rc=$?
+  trap - EXIT INT TERM HUP
+  if [ "$PREPARE_ARMED" = true ] && [ "$CLEANUP_DONE" = false ]; then
+    CLEANUP_DONE=true
+    PREPARE_ARMED=false
+    [ "$rc" -ne 0 ] || rc=1
+    echo "" >&2
+    echo "PREPARATION FAILED or was interrupted (exit ${rc}) -- restoring the candidate environment and" >&2
+    echo "deleting the temporary verification resources..." >&2
+    if teardown_verification_environment >&2; then
+      clear_pending_state
+      echo "Candidate environment restored; temporary resources removed; nothing is pending." >&2
+    else
+      echo "Error: automatic cleanup was INCOMPLETE. Pending state RETAINED at ${PENDING_STATE_FILE}." >&2
+      echo "Re-run: $0 --abort-verification   (safe to repeat)" >&2
+    fi
+  fi
+  exit "$rc"
+}
+
+install_prepare_traps() {
+  # Trap-state variables (PREPARE_ARMED, CLEANUP_DONE) are initialised at the
+  # top of the script, BEFORE this runs -- an EXIT trap firing after a function
+  # has returned must never see an unset (or function-local) variable under
+  # `set -u`. That was the original (removed) --verify-candidate defect.
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  trap 'exit 129' HUP
+  trap on_prepare_exit EXIT
+}
+
+require_candidate_revision() {
+  # Args: <service>. Prints the candidate-tagged revision after confirming it
+  # exists, serves 0% and is not the production revision.
+  local svc="$1" rev prod pct
+  rev="$(tagged_revision_name "$svc")"
+  prod="$(prod_revision_name "$svc")"
+  pct="$(candidate_traffic_percent "$svc")"
+  if [ -z "$rev" ]; then
+    echo "Error: no candidate-tagged revision for ${svc}. Run '$0 --deploy-candidate' first." >&2
+    return 1
+  fi
+  if [ "${pct:-0}" != "0" ]; then
+    echo "Error: candidate revision ${rev} of ${svc} is serving ${pct}% of traffic (must be 0%)." >&2
+    return 1
+  fi
+  if [ -z "$prod" ] || [ "$rev" = "$prod" ]; then
+    echo "Error: candidate revision of ${svc} (${rev}) is not distinct from production (${prod:-<none>})." >&2
+    return 1
+  fi
+  printf '%s' "$rev"
+}
+
+prepare_verification() {
   preflight_guards
+  gcloud config set project "$PROJECT_ID" >/dev/null
+  derive_temp_names
 
-  local short_sha="${GIT_SHA:0:12}"
-  local verify_topic="${VERIFY_TOPIC_PREFIX}-${short_sha}"
-  local verify_sub="${verify_topic}${VERIFY_SUBSCRIPTION_SUFFIX}"
-  local worker_tagged_url worker_untagged_url api_tagged_url
-  local candidate_worker_rev prod_worker_rev
+  if [ -f "$PENDING_STATE_FILE" ]; then
+    echo "Error: a verification is already pending for ${GIT_SHA} (${PENDING_STATE_FILE})." >&2
+    echo "  Finish it with '$0 --complete-verification --mission-id=<ID>' or discard it with '$0 --abort-verification'." >&2
+    exit 1
+  fi
+  local n
+  for n in "$MISSION_SUB" "$IMPACT_VERIFY_SUB"; do
+    if gcloud pubsub subscriptions describe "$n" >/dev/null 2>&1; then
+      echo "Error: ${n} already exists but no pending state records it (orphan from an unrecorded run)." >&2
+      echo "  Inspect, then delete manually: gcloud pubsub subscriptions delete ${n}" >&2
+      exit 1
+    fi
+  done
+  for n in "$MISSION_TOPIC" "$IMPACT_VERIFY_TOPIC"; do
+    if gcloud pubsub topics describe "$n" >/dev/null 2>&1; then
+      echo "Error: ${n} already exists but no pending state records it (orphan from an unrecorded run)." >&2
+      echo "  Inspect, then delete manually: gcloud pubsub topics delete ${n}" >&2
+      exit 1
+    fi
+  done
 
+  echo "1. Confirming the four candidate revisions exist at 0% traffic and differ from production..."
+  local rating_rev worker_rev api_rev web_rev
+  rating_rev="$(require_candidate_revision rateguard-rating-engine)" || exit 1
+  worker_rev="$(require_candidate_revision rateguard-worker)" || exit 1
+  api_rev="$(require_candidate_revision rateguard-api)" || exit 1
+  web_rev="$(require_candidate_revision rateguard-web)" || exit 1
+
+  local prod_rating_rev prod_worker_rev prod_api_rev prod_web_rev
+  prod_rating_rev="$(prod_revision_name rateguard-rating-engine)"
+  prod_worker_rev="$(prod_revision_name rateguard-worker)"
+  prod_api_rev="$(prod_revision_name rateguard-api)"
+  prod_web_rev="$(prod_revision_name rateguard-web)"
+
+  local worker_tagged_url worker_untagged_url api_tagged_url web_tagged_url
   worker_tagged_url="$(get_tagged_url rateguard-worker)"
   worker_untagged_url="$(get_untagged_url rateguard-worker)"
   api_tagged_url="$(get_tagged_url rateguard-api)"
-  if [ -z "$worker_tagged_url" ] || [ -z "$worker_untagged_url" ] || [ -z "$api_tagged_url" ]; then
-    echo "Error: no candidate-tagged rateguard-worker/rateguard-api revision found." >&2
-    echo "Run '$0 --deploy-candidate' first." >&2
+  web_tagged_url="$(get_tagged_url rateguard-web)"
+  if [ -z "$worker_tagged_url" ] || [ -z "$worker_untagged_url" ] || [ -z "$api_tagged_url" ] || [ -z "$web_tagged_url" ]; then
+    echo "Error: could not discover the candidate worker/api/web URLs. Run '$0 --deploy-candidate' first." >&2
     exit 1
   fi
 
-  # Recorded now, BEFORE any test traffic -- the acceptance-evidence baseline
-  # this verification must prove the mission actually ran on, never inferred
-  # after the fact from a --tag lookup made once the candidate has moved on.
-  candidate_worker_rev="$(tagged_revision_name rateguard-worker)"
-  prod_worker_rev="$(prod_revision_name rateguard-worker)"
-  if [ -z "$candidate_worker_rev" ] || [ "$candidate_worker_rev" = "$prod_worker_rev" ]; then
-    echo "Error: could not determine a distinct candidate worker revision (candidate=${candidate_worker_rev:-<none>}, production=${prod_worker_rev:-<none>})." >&2
+  local rating_image worker_image api_image web_image backend_artifact_digest
+  rating_image="$(resolve_revision_digest rateguard-rating-engine "$rating_rev")"
+  worker_image="$(resolve_revision_digest rateguard-worker "$worker_rev")"
+  api_image="$(resolve_revision_digest rateguard-api "$api_rev")"
+  web_image="$(resolve_revision_digest rateguard-web "$web_rev")"
+  backend_artifact_digest="$(resolve_image_digest "$BACKEND_IMAGE")"
+  if [ -z "$rating_image" ] || [ -z "$worker_image" ] || [ -z "$api_image" ] || [ -z "$web_image" ] || [ -z "$backend_artifact_digest" ]; then
+    echo "Error: could not resolve all four candidate image digests. Refusing to continue." >&2
     exit 1
   fi
+  assert_api_worker_same_digest "$api_rev" "$worker_rev"
 
-  echo "1. Recording the REAL ${PROD_PUBSUB_SUBSCRIPTION} state (must remain byte-for-byte"
-  echo "   unchanged throughout -- this script never creates a subscription on, or publishes"
-  echo "   to, the production topic ${PROD_PUBSUB_TOPIC})..."
-  local before_state
-  before_state="$(gcloud pubsub subscriptions describe "$PROD_PUBSUB_SUBSCRIPTION" --format=json)"
+  local orig_api_topic orig_api_impact orig_worker_impact
+  orig_api_topic="$(service_env_value rateguard-api RATEGUARD_PUBSUB_TOPIC)" || exit 1
+  orig_api_impact="$(service_env_value rateguard-api RATEGUARD_IMPACT_TOPIC)" || exit 1
+  orig_worker_impact="$(service_env_value rateguard-worker RATEGUARD_IMPACT_TOPIC)" || exit 1
 
-  echo "2. Creating an ISOLATED, SHA-scoped verification topic ${verify_topic} +"
-  echo "   subscription ${verify_sub} (never the production topic -- Pub/Sub fan-out means a"
-  echo "   subscription on the shared production topic would ALSO deliver every verification"
-  echo "   message to the real assurance-runs-worker-sub / production worker and race it)..."
-  if gcloud pubsub topics describe "$verify_topic" >/dev/null 2>&1 || gcloud pubsub subscriptions describe "$verify_sub" >/dev/null 2>&1; then
-    echo "Error: ${verify_topic}/${verify_sub} already exist from a prior, incompletely-cleaned-up run." >&2
-    echo "  Inspect and delete manually: gcloud pubsub subscriptions delete ${verify_sub}; gcloud pubsub topics delete ${verify_topic}" >&2
-    exit 1
-  fi
-  gcloud pubsub topics create "$verify_topic" >/dev/null
-  gcloud pubsub topics add-iam-policy-binding "$verify_topic" \
+  echo "2. Recording the production revisions and the LIVE production subscription configurations"
+  echo "   (${PROD_PUBSUB_SUBSCRIPTION}, ${PROD_IMPACT_SUBSCRIPTION}) byte for byte..."
+  snapshot_prod_subscriptions || exit 1
+
+  # A new preparation invalidates any earlier verification of this SHA: the
+  # candidate environment is about to change, so old evidence no longer proves it.
+  rm -f "${VERIFIED_MARKER_DIR}/${GIT_SHA}" "${VERIFIED_MARKER_DIR}/${GIT_SHA}.evidence" "$ABORTED_MARKER"
+
+  # Written BEFORE the first mutation; every restore step reads only this file.
+  state_set "$PENDING_STATE_FILE" \
+    "phase=preparing" "git_sha=${GIT_SHA}" "project_id=${PROJECT_ID}" "region=${REGION}" \
+    "prepared_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    "firestore_collection=${PROD_FIRESTORE_COLLECTION}" "gcs_bucket=${PROD_GCS_BUCKET}" \
+    "mission_topic=${MISSION_TOPIC}" "mission_subscription=${MISSION_SUB}" \
+    "impact_topic=${IMPACT_VERIFY_TOPIC}" "impact_subscription=${IMPACT_VERIFY_SUB}" \
+    "worker_tagged_url=${worker_tagged_url}" "worker_stable_url=${worker_untagged_url}" \
+    "api_tagged_url=${api_tagged_url}" "web_tagged_url=${web_tagged_url}" \
+    "original_api_pubsub_topic=${orig_api_topic}" "original_api_impact_topic=${orig_api_impact}" \
+    "original_worker_impact_topic=${orig_worker_impact}" \
+    "initial_candidate_worker_revision=${worker_rev}" "initial_candidate_api_revision=${api_rev}" \
+    "candidate_rating_engine_revision=${rating_rev}" "candidate_web_revision=${web_rev}" \
+    "production_worker_revision=${prod_worker_rev}" "production_api_revision=${prod_api_rev}" \
+    "production_rating_engine_revision=${prod_rating_rev}" "production_web_revision=${prod_web_rev}" \
+    "rating_engine_image=${rating_image}" "worker_image=${worker_image}" "api_image=${api_image}" "web_image=${web_image}" \
+    "candidate_worker_image_digest=${backend_artifact_digest}" \
+    "production_subscriptions_dir=${PROD_SUBS_DIR}"
+
+  PREPARE_ARMED=true
+  install_prepare_traps
+
+  echo "3. Creating the isolated mission topic ${MISSION_TOPIC} and impact topic ${IMPACT_VERIFY_TOPIC}"
+  echo "   (NEVER ${PROD_PUBSUB_TOPIC} / ${PROD_IMPACT_TOPIC}, and no subscription is added to either)..."
+  gcloud pubsub topics create "$MISSION_TOPIC" >/dev/null
+  gcloud pubsub topics create "$IMPACT_VERIFY_TOPIC" >/dev/null
+  gcloud pubsub topics add-iam-policy-binding "$MISSION_TOPIC" \
     --member="serviceAccount:${API_SA}" --role="roles/pubsub.publisher" >/dev/null
-  # Push endpoint is the candidate-tagged worker URL (routes specifically to
-  # THIS candidate revision), but the OIDC audience is the STABLE, untagged
-  # worker URL -- the form Cloud Run's push auth is actually proven to
-  # accept in this project (see infrastructure/setup_impact_pubsub.sh's
-  # live, working impact-batches subscription, which uses the same
-  # base-URL-as-audience pattern). A prior version of this script used the
-  # --tag URL itself as the audience, which was never validated against real
-  # Cloud Run push-auth behavior -- do not reintroduce that.
-  gcloud pubsub subscriptions create "$verify_sub" \
-    --topic="$verify_topic" \
-    --ack-deadline=600 \
+  gcloud pubsub topics add-iam-policy-binding "$IMPACT_VERIFY_TOPIC" \
+    --member="serviceAccount:${WORKER_SA}" --role="roles/pubsub.publisher" >/dev/null
+
+  echo "4. Creating the push subscriptions -- each routed ONLY to the candidate worker's own route."
+  echo "   Push endpoint = candidate-tagged worker URL; OIDC audience = the STABLE, untagged worker URL"
+  echo "   (the proven form; see infrastructure/setup_impact_pubsub.sh -- never a --tag URL)."
+  gcloud pubsub subscriptions create "$MISSION_SUB" \
+    --topic="$MISSION_TOPIC" \
+    --ack-deadline=600 --expiration-period=2d \
     --push-endpoint="${worker_tagged_url}/internal/pubsub/assurance" \
     --push-auth-service-account="$WORKER_SA" \
-    --push-auth-token-audience="$worker_untagged_url"
+    --push-auth-token-audience="$worker_untagged_url" >/dev/null
+  # No dead-letter topic: the production DLQ must never receive candidate messages.
+  gcloud pubsub subscriptions create "$IMPACT_VERIFY_SUB" \
+    --topic="$IMPACT_VERIFY_TOPIC" \
+    --ack-deadline=600 --min-retry-delay=10s --max-retry-delay=600s --expiration-period=2d \
+    --push-endpoint="${worker_tagged_url}/internal/pubsub/impact-batch" \
+    --push-auth-service-account="$WORKER_SA" \
+    --push-auth-token-audience="$worker_untagged_url" >/dev/null
 
-  echo "3. Retargeting the candidate API's (still --no-traffic, --tag ${CANDIDATE_TAG} only)"
-  echo "   publish topic at ${verify_topic} -- this is what actually confines every"
-  echo "   verification message to the isolated topic instead of production's ${PROD_PUBSUB_TOPIC}..."
-  gcloud run services update rateguard-api --region "$REGION" --no-traffic --tag "$CANDIDATE_TAG" \
-    --update-env-vars "RATEGUARD_PUBSUB_TOPIC=${verify_topic}" >/dev/null
-  api_tagged_url="$(get_tagged_url rateguard-api)"
+  echo "5. Pointing the candidate publishers ONLY at the temporary topics (still --no-traffic)..."
+  set_candidate_env rateguard-worker "RATEGUARD_IMPACT_TOPIC=${IMPACT_VERIFY_TOPIC}"
+  set_candidate_env rateguard-api "RATEGUARD_PUBSUB_TOPIC=${MISSION_TOPIC}" "RATEGUARD_IMPACT_TOPIC=${IMPACT_VERIFY_TOPIC}"
 
-  local cleanup_done=false
-  cleanup_verify_resources() {
-    [ "$cleanup_done" = true ] && return
-    cleanup_done=true
-    echo "6. Restoring the candidate API's publish topic to ${PROD_PUBSUB_TOPIC}..."
-    if ! gcloud run services update rateguard-api --region "$REGION" --no-traffic --tag "$CANDIDATE_TAG" \
-      --update-env-vars "RATEGUARD_PUBSUB_TOPIC=${PROD_PUBSUB_TOPIC}" >/dev/null 2>&1; then
-      echo "Error: failed to restore candidate API's RATEGUARD_PUBSUB_TOPIC to ${PROD_PUBSUB_TOPIC}. MANUAL FIX REQUIRED." >&2
-    fi
-    echo "   Deleting ephemeral verification subscription ${verify_sub} and topic ${verify_topic}"
-    echo "   (never the acceptance evidence itself -- that lives in Firestore/GCS/the verified-"
-    echo "   marker directory, not in these ephemeral Pub/Sub resources)..."
-    if ! gcloud pubsub subscriptions delete "$verify_sub" >/dev/null 2>&1; then
-      echo "Error: failed to delete ${verify_sub}. MANUAL CLEANUP REQUIRED: gcloud pubsub subscriptions delete ${verify_sub}" >&2
-    fi
-    if ! gcloud pubsub topics delete "$verify_topic" >/dev/null 2>&1; then
-      echo "Error: failed to delete ${verify_topic}. MANUAL CLEANUP REQUIRED: gcloud pubsub topics delete ${verify_topic}" >&2
-    fi
-    echo "   Confirming the REAL ${PROD_PUBSUB_SUBSCRIPTION} is byte-for-byte unchanged..."
-    local after_state
-    after_state="$(gcloud pubsub subscriptions describe "$PROD_PUBSUB_SUBSCRIPTION" --format=json)"
-    if [ "$before_state" != "$after_state" ]; then
-      echo "Error: ${PROD_PUBSUB_SUBSCRIPTION} changed during verification. Treat production" >&2
-      echo "Pub/Sub routing as SUSPECT and investigate before promoting anything." >&2
+  if [ "$(service_env_value rateguard-worker RATEGUARD_IMPACT_TOPIC)" != "$IMPACT_VERIFY_TOPIC" ] \
+    || [ "$(service_env_value rateguard-api RATEGUARD_PUBSUB_TOPIC)" != "$MISSION_TOPIC" ] \
+    || [ "$(service_env_value rateguard-api RATEGUARD_IMPACT_TOPIC)" != "$IMPACT_VERIFY_TOPIC" ]; then
+    echo "Error: candidate environment does not carry the temporary topics after the update." >&2
+    exit 1
+  fi
+
+  echo "6. Recording the FINAL candidate revisions (after every temporary environment change)..."
+  local final_worker_rev final_api_rev
+  final_worker_rev="$(require_candidate_revision rateguard-worker)" || exit 1
+  final_api_rev="$(require_candidate_revision rateguard-api)" || exit 1
+  assert_api_worker_same_digest "$final_api_rev" "$final_worker_rev"
+  local svc want
+  for svc in "rateguard-worker:${prod_worker_rev}" "rateguard-api:${prod_api_rev}" \
+             "rateguard-rating-engine:${prod_rating_rev}" "rateguard-web:${prod_web_rev}"; do
+    want="${svc#*:}"
+    if [ "$(prod_revision_name "${svc%%:*}")" != "$want" ]; then
+      echo "Error: production revision of ${svc%%:*} changed during preparation." >&2
       exit 1
     fi
-    echo "   Confirmed: ${PROD_PUBSUB_SUBSCRIPTION} is unchanged -- no candidate message could"
-    echo "   ever have reached it (verification published only to ${verify_topic})."
-  }
-  trap cleanup_verify_resources EXIT
+  done
 
-  local idem_key="candidate-verify-${short_sha}"
-  echo "4. Creating a mission through the candidate API with the synthetic tenant '${VERIFY_TENANT}'..."
-  echo "   Manual/CI step: POST ${api_tagged_url}/api/v1/missions with"
-  echo "   X-Idempotency-Key: ${idem_key}"
-  echo "   tenant_id: ${VERIFY_TENANT} (synthetic, never a real customer tenant)"
-  echo "   Poll GET ${api_tagged_url}/api/v1/missions/<id> until a TERMINAL status"
-  echo "   (COMPLETED/FAILED/REVIEW_REQUIRED) -- a 202/QUEUED response is NOT acceptance evidence."
-  echo "   PROOF the CANDIDATE worker (not production) processed it -- download"
-  echo "   GET ${api_tagged_url}/api/v1/missions/<id>/evidence/bundle and confirm:"
-  echo "     deployment.json.cloud_run_revision == '${candidate_worker_rev}' (candidate, recorded"
-  echo "       in step 1 above) and != '${prod_worker_rev:-<none>}' (current production worker)"
-  echo "     deployment.json.git_sha == '${GIT_SHA}'"
+  echo "   Confirming the production subscriptions are still byte-for-byte unchanged..."
+  confirm_prod_subscriptions_unchanged || exit 1
 
-  echo "5. Re-publish the SAME idempotency key a second time (into ${verify_topic}, still never"
-  echo "   production) and confirm exactly one terminal mission/decision exists for it -- proves"
-  echo "   the candidate path is idempotent under redelivery, matching the existing tested"
-  echo "   guarantee in tests/agents/test_worker_delivery_outcomes.py."
+  state_set "$PENDING_STATE_FILE" \
+    "candidate_worker_revision=${final_worker_rev}" "candidate_api_revision=${final_api_rev}" "phase=ready"
 
-  echo "   (Steps 4-5 issue real authenticated HTTP calls and are intentionally left as an"
-  echo "   explicit manual/CI action, not auto-executed here, so this script never silently"
-  echo "   fabricates a synthetic-tenant mission against production infrastructure without a"
-  echo "   human or CI pipeline directly observing each response.)"
-  echo ""
-  echo "Once steps 4-5 above are confirmed successful -- INCLUDING the revision/SHA evidence"
-  echo "check -- run:"
-  echo "  $0 --record-verified"
-  echo "to resolve+pin the verified digests and write the marker promote_candidate_to_production.sh"
-  echo "requires. Cleanup of ${verify_topic}/${verify_sub} above runs regardless, success or"
-  echo "failure, and never deletes that acceptance evidence."
+  # Success: the environment is deliberately LEFT IN PLACE for the observed manual run.
+  PREPARE_ARMED=false
+  trap - EXIT INT TERM HUP
+
+  local short="${GIT_SHA:0:12}"
+  cat <<READY
+========================================================
+CANDIDATE VERIFICATION ENVIRONMENT READY (0% production traffic)
+Full SHA:                  ${GIT_SHA}
+Candidate worker revision: ${final_worker_rev}   (production: ${prod_worker_rev})
+Isolated mission topic:    ${MISSION_TOPIC} -> ${worker_tagged_url}/internal/pubsub/assurance
+Isolated impact topic:     ${IMPACT_VERIFY_TOPIC} -> ${worker_tagged_url}/internal/pubsub/impact-batch
+Pending state:             ${PENDING_STATE_FILE}
+
+Candidate web URL:         ${web_tagged_url}
+
+RUN ONE OBSERVED, SYNTHETIC MISSION (controlled workbook vs versioned REST connector):
+  1. Open the candidate web URL above and sign in with your usual demo-tenant account
+     in the browser. (Do not paste passwords or tokens into a terminal or this script.)
+  2. Create a mission named exactly:
+        [CANDIDATE-VERIFY-${short}] controlled workbook vs versioned REST connector
+     Source A: a controlled workbook (upload or pick an existing controlled workbook).
+     Source B: the versioned REST connector, with an explicit engine version.
+  3. Wait until the mission reaches a terminal decision (QUEUED/RUNNING/202 is NOT success).
+  4. Note the mission ID (MIS-XXXXXXXX), then run:
+        $0 --complete-verification --mission-id=<MISSION_ID>
+     or, to discard this environment:
+        $0 --abort-verification
+
+Complete/abort need operator Application Default Credentials
+(gcloud auth application-default login) and the backend Python dependencies.
+The temporary subscriptions self-expire after 2 days if you forget them.
+========================================================
+READY
+}
+
+run_helper() {
+  # Args: <check|duplicate> <mission id>. Operator ADC only; no token is read.
+  PYTHONPATH="backend${PYTHONPATH:+:${PYTHONPATH}}" "$HELPER_PYTHON" "$HELPER_SCRIPT" "$1" \
+    --state-file "$PENDING_STATE_FILE" --mission-id "$2"
+}
+
+complete_verification() {
+  preflight_guards
+  gcloud config set project "$PROJECT_ID" >/dev/null
+  derive_temp_names
+
+  if [ -z "$MISSION_ID" ]; then
+    echo "Error: --complete-verification requires --mission-id=<ID>." >&2
+    exit 2
+  fi
+  if [ ! -f "$PENDING_STATE_FILE" ]; then
+    echo "Error: no pending verification for ${GIT_SHA} (${PENDING_STATE_FILE}). Run '$0 --prepare-verification' first." >&2
+    exit 1
+  fi
+  assert_state_matches_derived_names || exit 1
+  if [ "$(state_get "$PENDING_STATE_FILE" phase)" != "ready" ]; then
+    echo "Error: the pending state is not 'ready' (phase=$(state_get "$PENDING_STATE_FILE" phase)); run '$0 --abort-verification'." >&2
+    exit 1
+  fi
+
+  echo "1. Confirming the deployed revisions are exactly the ones recorded at preparation..."
+  local svc spec
+  for spec in "rateguard-worker:candidate_worker_revision:production_worker_revision" \
+              "rateguard-api:candidate_api_revision:production_api_revision" \
+              "rateguard-rating-engine:candidate_rating_engine_revision:production_rating_engine_revision" \
+              "rateguard-web:candidate_web_revision:production_web_revision"; do
+    svc="${spec%%:*}"
+    if [ "$(tagged_revision_name "$svc")" != "$(state_get "$PENDING_STATE_FILE" "$(echo "$spec" | cut -d: -f2)")" ]; then
+      echo "Error: the candidate revision of ${svc} changed since preparation. Run '$0 --abort-verification' and start over." >&2
+      exit 1
+    fi
+    if [ "$(prod_revision_name "$svc")" != "$(state_get "$PENDING_STATE_FILE" "$(echo "$spec" | cut -d: -f3)")" ]; then
+      echo "Error: the PRODUCTION revision of ${svc} changed since preparation. Refusing." >&2
+      exit 1
+    fi
+  done
+
+  echo "2. Checking mission ${MISSION_ID}: terminal decision, evidence bundle, candidate revision/SHA, provenance..."
+  if ! run_helper check "$MISSION_ID" >/dev/null; then
+    echo "Error: mission checks failed. Verification is NOT complete; promotion is refused." >&2
+    echo "  The isolated environment is still in place: fix and re-run, or '$0 --abort-verification'." >&2
+    exit 1
+  fi
+  echo "3. Live duplicate-delivery test: same envelope published twice to ${MISSION_TOPIC}..."
+  if ! run_helper duplicate "$MISSION_ID" >/dev/null; then
+    echo "Error: duplicate-delivery checks failed. Verification is NOT complete; promotion is refused." >&2
+    exit 1
+  fi
+  echo "4. Confirming the production subscriptions are unchanged..."
+  confirm_prod_subscriptions_unchanged || exit 1
+
+  echo "5. Restoring the candidate environment and deleting the temporary resources..."
+  if ! teardown_verification_environment; then
+    echo "Error: cleanup incomplete; the pending state is RETAINED and promotion is refused." >&2
+    echo "  Re-run '$0 --abort-verification' (idempotent) to finish cleaning up." >&2
+    exit 1
+  fi
+
+  echo "6. Pinning the four verified image digests (post-restore candidate revisions)..."
+  local rating_rev worker_rev api_rev web_rev
+  rating_rev="$(require_candidate_revision rateguard-rating-engine)" || exit 1
+  worker_rev="$(require_candidate_revision rateguard-worker)" || exit 1
+  api_rev="$(require_candidate_revision rateguard-api)" || exit 1
+  web_rev="$(require_candidate_revision rateguard-web)" || exit 1
+  local rating_image worker_image api_image web_image
+  rating_image="$(resolve_revision_digest rateguard-rating-engine "$rating_rev")"
+  worker_image="$(resolve_revision_digest rateguard-worker "$worker_rev")"
+  api_image="$(resolve_revision_digest rateguard-api "$api_rev")"
+  web_image="$(resolve_revision_digest rateguard-web "$web_rev")"
+  if [ -z "$worker_image" ] || [ "$worker_image" != "$api_image" ] \
+    || [ "$worker_image" != "$(state_get "$PENDING_STATE_FILE" worker_image)" ] \
+    || [ "$rating_image" != "$(state_get "$PENDING_STATE_FILE" rating_engine_image)" ] \
+    || [ "$web_image" != "$(state_get "$PENDING_STATE_FILE" web_image)" ]; then
+    echo "Error: the restored candidate images do not match the digests recorded at preparation." >&2
+    echo "  Refusing to pin; the pending state is RETAINED. Run '$0 --abort-verification'." >&2
+    exit 1
+  fi
+
+  mkdir -p "$VERIFIED_MARKER_DIR"
+  cat > "${VERIFIED_MARKER_DIR}/${GIT_SHA}.evidence" <<EVIDENCE
+GIT_SHA=${GIT_SHA}
+VERIFICATION_COMPLETE=true
+VERIFIED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+MISSION_ID=${MISSION_ID}
+VERIFIED_WORKER_REVISION=$(state_get "$PENDING_STATE_FILE" candidate_worker_revision)
+VERIFIED_API_REVISION=$(state_get "$PENDING_STATE_FILE" candidate_api_revision)
+RATING_ENGINE_REVISION=${rating_rev}
+RATING_ENGINE_DIGEST=${rating_image}
+WORKER_REVISION=${worker_rev}
+WORKER_DIGEST=${worker_image}
+API_REVISION=${api_rev}
+API_DIGEST=${api_image}
+WEB_REVISION=${web_rev}
+WEB_DIGEST=${web_image}
+EVIDENCE
+  clear_pending_state
+  echo "========================================================"
+  echo "VERIFICATION COMPLETE for ${GIT_SHA} (mission ${MISSION_ID})."
+  echo "Digests pinned in ${VERIFIED_MARKER_DIR}/${GIT_SHA}.evidence; pending state cleared."
+  echo "Next: $0 --record-verified"
+  echo "========================================================"
+}
+
+abort_verification() {
+  preflight_guards
+  gcloud config set project "$PROJECT_ID" >/dev/null
+  derive_temp_names
+  if [ ! -f "$PENDING_STATE_FILE" ]; then
+    echo "No pending verification for ${GIT_SHA} (${PENDING_STATE_FILE} absent) -- nothing to restore."
+    return 0
+  fi
+  assert_state_matches_derived_names || exit 1
+  if ! teardown_verification_environment; then
+    echo "Error: abort incomplete. Pending state RETAINED at ${PENDING_STATE_FILE}; re-run '$0 --abort-verification'." >&2
+    exit 1
+  fi
+  clear_pending_state
+  mkdir -p "$VERIFIED_MARKER_DIR"
+  rm -f "${VERIFIED_MARKER_DIR}/${GIT_SHA}" "${VERIFIED_MARKER_DIR}/${GIT_SHA}.evidence"
+  printf 'aborted at %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$ABORTED_MARKER"
+  echo "Verification aborted: candidate environment restored, temporary resources deleted."
+  echo "Any Firestore/GCS acceptance evidence was preserved. Promotion of ${GIT_SHA} stays refused"
+  echo "until a new --prepare-verification / --complete-verification succeeds."
 }
 
 record_verified() {
+  # Writes the marker promote_candidate_to_production.sh requires -- ONLY for a
+  # verification that --complete-verification finished (its evidence file says
+  # so) and that has no pending or aborted state.
+  local evidence="${VERIFIED_MARKER_DIR}/${GIT_SHA}.evidence"
+  if [ -f "$PENDING_STATE_FILE" ]; then
+    echo "Error: a verification is still pending for ${GIT_SHA}. Complete or abort it first." >&2
+    exit 1
+  fi
+  if [ -f "$ABORTED_MARKER" ]; then
+    echo "Error: verification of ${GIT_SHA} was aborted. Refusing to record it as verified." >&2
+    exit 1
+  fi
+  if [ ! -f "$evidence" ] || [ "$(kv_get "$evidence" VERIFICATION_COMPLETE)" != "true" ] \
+    || [ "$(kv_get "$evidence" GIT_SHA)" != "$GIT_SHA" ] || [ -z "$(kv_get "$evidence" MISSION_ID)" ]; then
+    echo "Error: no completed verification for ${GIT_SHA}. Run '$0 --prepare-verification' then" >&2
+    echo "'$0 --complete-verification --mission-id=<ID>' first." >&2
+    exit 1
+  fi
+  local svc key rev
+  for svc in "rateguard-rating-engine:RATING_ENGINE" "rateguard-worker:WORKER" "rateguard-api:API" "rateguard-web:WEB"; do
+    key="${svc#*:}"
+    rev="$(tagged_revision_name "${svc%%:*}")"
+    if [ -z "$rev" ] || [ "$rev" != "$(kv_get "$evidence" "${key}_REVISION")" ] \
+      || [ "$(resolve_revision_digest "${svc%%:*}" "$rev")" != "$(kv_get "$evidence" "${key}_DIGEST")" ]; then
+      echo "Error: the candidate ${svc%%:*} deployment has moved since verification completed. Refusing." >&2
+      exit 1
+    fi
+  done
   mkdir -p "$VERIFIED_MARKER_DIR"
-
-  local rating_engine_rev worker_rev api_rev web_rev
-  local rating_engine_digest worker_digest api_digest web_digest
-  rating_engine_rev="$(tagged_revision_name rateguard-rating-engine)"
-  worker_rev="$(tagged_revision_name rateguard-worker)"
-  api_rev="$(tagged_revision_name rateguard-api)"
-  web_rev="$(tagged_revision_name rateguard-web)"
-  if [ -z "$rating_engine_rev" ] || [ -z "$worker_rev" ] || [ -z "$api_rev" ] || [ -z "$web_rev" ]; then
-    echo "Error: could not resolve all four candidate-tagged revisions (rating-engine=${rating_engine_rev:-<none>}," >&2
-    echo "worker=${worker_rev:-<none>}, api=${api_rev:-<none>}, web=${web_rev:-<none>}). Refusing to record" >&2
-    echo "a verified marker for an incomplete/moved candidate deployment." >&2
-    exit 1
-  fi
-  rating_engine_digest="$(resolve_revision_digest rateguard-rating-engine "$rating_engine_rev")"
-  worker_digest="$(resolve_revision_digest rateguard-worker "$worker_rev")"
-  api_digest="$(resolve_revision_digest rateguard-api "$api_rev")"
-  web_digest="$(resolve_revision_digest rateguard-web "$web_rev")"
-  if [ -z "$worker_digest" ] || [ "$worker_digest" != "$api_digest" ]; then
-    echo "Error: candidate worker digest (${worker_digest:-<none>}) does not match candidate API" >&2
-    echo "digest (${api_digest:-<none>}) at record-verified time. Refusing to pin mismatched digests." >&2
-    exit 1
-  fi
-
-  printf 'verified at %s by %s\n' \
-    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(whoami 2>/dev/null || echo unknown)" \
+  printf 'verified at %s by %s (mission %s)\n' \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(whoami 2>/dev/null || echo unknown)" "$(kv_get "$evidence" MISSION_ID)" \
     > "${VERIFIED_MARKER_DIR}/${GIT_SHA}"
-
-  # Structured evidence promote_candidate_to_production.sh reads to RESOLVE
-  # AND PIN the exact digests it promotes, refusing to proceed if the
-  # `candidate` tag has since moved to a different, unverified deployment.
-  cat > "${VERIFIED_MARKER_DIR}/${GIT_SHA}.evidence" <<EVIDENCE
-GIT_SHA=${GIT_SHA}
-VERIFIED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-RATING_ENGINE_REVISION=${rating_engine_rev}
-RATING_ENGINE_DIGEST=${rating_engine_digest}
-WORKER_REVISION=${worker_rev}
-WORKER_DIGEST=${worker_digest}
-API_REVISION=${api_rev}
-API_DIGEST=${api_digest}
-WEB_REVISION=${web_rev}
-WEB_DIGEST=${web_digest}
-EVIDENCE
-
   echo "Verified marker written: ${VERIFIED_MARKER_DIR}/${GIT_SHA}"
-  echo "Verified evidence (pinned digests) written: ${VERIFIED_MARKER_DIR}/${GIT_SHA}.evidence"
+  echo "Pinned digests: ${evidence}"
   echo "promote_candidate_to_production.sh will now accept this SHA without --skip-verification-check,"
   echo "and will refuse to promote if the candidate tag has since moved off these exact digests."
 }
 
 case "$MODE" in
   deploy) deploy_candidate ;;
-  verify) verify_candidate_async_path ;;
-  record-verified) record_verified ;;
+  prepare) prepare_verification ;;
+  complete) complete_verification ;;
+  abort) abort_verification ;;
+  record-verified) preflight_guards; record_verified ;;
   *) print_plan ;;
 esac

@@ -17,6 +17,18 @@
   `/internal/pubsub/impact-batch` route → 404 → Pub/Sub retries with backoff and, after 5 attempts, dead-letters to
   `impact-batches-dead-letter`. Batch results are checkpointed and idempotent, so redelivery after restoring the new
   revision resumes the job without double counting (proven in `tests/impact`, and in the live drill recorded in STATUS.md).
+* **Candidate verification left half-done (crash, lost terminal, abandoned test):** the candidate API/worker still
+  carry the *temporary* mission/impact topic names and the temporary topics/subscriptions still exist. Production is
+  unaffected (they only ever receive candidate traffic), but the candidate must not be promoted in that state.
+  Check out the SHA that was prepared and run `infrastructure/deploy_candidate_enhanced.sh --abort-verification`:
+  it restores the recorded original env values from `infrastructure/.candidate-verified/<sha>.pending.json`,
+  deletes only the SHA-scoped `assurance-runs-candidate-verify-<sha12>` / `impact-batches-candidate-verify-<sha12>`
+  topics and subscriptions, and confirms `assurance-runs-worker-sub` / `impact-batches-worker-sub` are unchanged
+  (it exits non-zero with a "SUSPECT" warning if they are). It is safe to repeat. Temporary subscriptions also
+  self-expire after 2 days. If the pending file is lost, restore by hand:
+  `gcloud run services update rateguard-api --region us-central1 --no-traffic --tag candidate --update-env-vars RATEGUARD_PUBSUB_TOPIC=assurance-runs,RATEGUARD_IMPACT_TOPIC=impact-batches`,
+  the same for `rateguard-worker` with `RATEGUARD_IMPACT_TOPIC=impact-batches`, then delete the four temporary
+  resources by name. Never delete `assurance-runs`, `impact-batches` or their production subscriptions.
 * **IAM rollback** commands are in `docs/security/IAM_INVENTORY.md` (per role). They are independent of the app rollback.
 * **Credential revocation is NOT reversible and NOT part of application rollback.** The deleted Firebase Admin
   key and disabled secret versions were never used by any revision; the app authenticates with ADC only.

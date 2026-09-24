@@ -114,6 +114,24 @@ def normalize_reason_codes(obj: Any) -> Any:
     return obj
 
 
+_DEPLOYMENT_FIELDS = ("git_sha", "image_digest", "cloud_run_service", "cloud_run_revision")
+
+
+def _deployment_provenance(meta: dict[str, Any]) -> dict[str, Any]:
+    """Provenance of the process that EXECUTED the mission (recorded by the
+    worker at lease time); falls back to this process's environment only for
+    missions that predate that record."""
+    recorded = meta.get("execution_provenance")
+    if isinstance(recorded, dict):
+        return {f: recorded.get(f) for f in _DEPLOYMENT_FIELDS}
+    return {
+        "git_sha": os.environ.get("RATEGUARD_GIT_SHA"),
+        "image_digest": os.environ.get("RATEGUARD_IMAGE_DIGEST"),
+        "cloud_run_service": os.environ.get("K_SERVICE"),
+        "cloud_run_revision": os.environ.get("K_REVISION"),
+    }
+
+
 def build_sections(
     *, record: Any, tenant_id: str, report: dict[str, Any], gemini_evidence: list[dict[str, Any]],
     connector_evidence: list[dict[str, Any]], explanations: list[dict[str, Any]],
@@ -182,12 +200,7 @@ def build_sections(
             "stage_outcomes": report.get("stage_outcomes", []),
         },
         "limitations.json": {"limitations": limitations},
-        "deployment.json": {
-            "git_sha": os.environ.get("RATEGUARD_GIT_SHA"),
-            "image_digest": os.environ.get("RATEGUARD_IMAGE_DIGEST"),
-            "cloud_run_service": os.environ.get("K_SERVICE"),
-            "cloud_run_revision": os.environ.get("K_REVISION"),
-        },
+        "deployment.json": _deployment_provenance(meta),
     }
 
 

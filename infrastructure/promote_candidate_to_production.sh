@@ -34,7 +34,7 @@
 #
 # Prerequisite: a candidate has already been built and deployed via
 # `deploy_candidate_enhanced.sh --deploy-candidate`, tested at its
-# --tag candidate URLs, and verified via --verify-candidate +
+# --tag candidate URLs, and verified via --prepare/--complete-verification +
 # --record-verified. This script never builds/rebuilds ANY image (including
 # web) -- it reuses whatever image is already running on the service's
 # `candidate`-tagged revision for rating-engine/worker/api/web alike, so
@@ -70,7 +70,7 @@ RATING_ENGINE_SA="rateguard-rating-engine-sa@${PROJECT_ID}.iam.gserviceaccount.c
 # than promoted, see reject_staging_named_resources below.
 OBSOLETE_STAGING_NAMES="assurance-runs-staging assurance-worker-staging assurance-runs-staging-dlq assurance-runs-staging-dlq-inspect assurance_runs_staging rateguard_staging rateguard-enhanced-artifacts-staging"
 
-# deploy_candidate_enhanced.sh's `--verify-candidate` mode is expected to
+# deploy_candidate_enhanced.sh's `--complete-verification` + `--record-verified` are expected to
 # write this marker (containing the full git SHA it verified) on a
 # successful, fully-cleaned-up async-worker verification run. Promotion
 # refuses to proceed without it unless --skip-verification-check is passed
@@ -125,16 +125,32 @@ require_verified_marker() {
   local sha="$1" cur_rating_engine_rev="$2" cur_worker_rev="$3" cur_api_rev="$4" cur_web_rev="$5"
   local evidence="${VERIFIED_MARKER_DIR}/${sha}.evidence"
 
+  # A pending verification means the candidate API/worker still carry TEMPORARY
+  # verification topics, and an aborted one was never proven. Neither can be
+  # overridden by --skip-verification-check: promoting either would repoint
+  # production at deleted/isolated topics or at an unverified candidate.
+  if [ -f "${VERIFIED_MARKER_DIR}/${sha}.pending.json" ]; then
+    echo "Error: a candidate verification is still PENDING for ${sha} (${VERIFIED_MARKER_DIR}/${sha}.pending.json)." >&2
+    echo "  Run deploy_candidate_enhanced.sh --complete-verification --mission-id=<ID> or --abort-verification first." >&2
+    exit 1
+  fi
+  if [ -f "${VERIFIED_MARKER_DIR}/${sha}.aborted" ]; then
+    echo "Error: the candidate verification of ${sha} was ABORTED. Re-run --prepare-verification and" >&2
+    echo "  --complete-verification before promoting." >&2
+    exit 1
+  fi
+
   if [ ! -f "${VERIFIED_MARKER_DIR}/${sha}" ]; then
     if [ "$SKIP_VERIFICATION_CHECK" = true ]; then
       echo "WARNING: --skip-verification-check passed -- promoting ${sha} WITHOUT a recorded" >&2
-      echo "'infrastructure/deploy_candidate_enhanced.sh --verify-candidate' pass. This is a" >&2
+      echo "completed 'infrastructure/deploy_candidate_enhanced.sh' verification lifecycle pass. This is a" >&2
       echo "deliberate operator override, not the default path." >&2
       return 0
     fi
     echo "Error: no verified marker for ${sha} at ${VERIFIED_MARKER_DIR}/${sha}." >&2
-    echo "  Run: infrastructure/deploy_candidate_enhanced.sh --verify-candidate" >&2
-    echo "  (then --record-verified) first, or pass --skip-verification-check to override deliberately." >&2
+    echo "  Run: infrastructure/deploy_candidate_enhanced.sh --prepare-verification, run one observed mission," >&2
+    echo "  then --complete-verification --mission-id=<ID> and --record-verified, or pass" >&2
+    echo "  --skip-verification-check to override deliberately." >&2
     exit 1
   fi
   echo "Verified marker found for ${sha}: $(cat "${VERIFIED_MARKER_DIR}/${sha}")"
@@ -153,6 +169,14 @@ require_verified_marker() {
 
   # shellcheck disable=SC1090
   source "$evidence"
+  if [ "${VERIFICATION_COMPLETE:-}" != "true" ]; then
+    if [ "$SKIP_VERIFICATION_CHECK" = true ]; then
+      echo "WARNING: --skip-verification-check passed -- ${evidence} is not from a completed verification." >&2
+      return 0
+    fi
+    echo "Error: ${evidence} is not from a completed --complete-verification. Refusing to promote." >&2
+    exit 1
+  fi
   local mismatch=""
   [ "${RATING_ENGINE_REVISION:-}" = "$cur_rating_engine_rev" ] || mismatch="${mismatch}rating-engine(verified=${RATING_ENGINE_REVISION:-<none>} current=${cur_rating_engine_rev:-<none>}) "
   [ "${WORKER_REVISION:-}" = "$cur_worker_rev" ] || mismatch="${mismatch}worker(verified=${WORKER_REVISION:-<none>} current=${cur_worker_rev:-<none>}) "
@@ -166,7 +190,7 @@ require_verified_marker() {
     fi
     echo "Error: the candidate tag has moved since ${sha} was verified -- refusing to promote an" >&2
     echo "UNVERIFIED deployment. Mismatched revisions: ${mismatch}" >&2
-    echo "  Re-run --verify-candidate + --record-verified against the current candidate, or pass" >&2
+    echo "  Re-run the verification lifecycle + --record-verified against the current candidate, or pass" >&2
     echo "  --skip-verification-check to override deliberately." >&2
     exit 1
   fi
@@ -204,7 +228,7 @@ for arg in "$@"; do
       echo "                              revisions and STOP -- re-run with --promote (no"
       echo "                              --canary-percent) to complete the shift to 100% once"
       echo "                              the canary has been verified."
-      echo "  --skip-verification-check   Deliberately bypass the --verify-candidate marker"
+      echo "  --skip-verification-check   Deliberately bypass the verification marker"
       echo "                              and digest-pin requirement (not the default; use only"
       echo "                              when a human operator has verified the candidate"
       echo "                              out-of-band)."
@@ -254,7 +278,7 @@ to be reversed; see infrastructure/rollback.sh):
 
 Verification requirement: this script refuses to promote a candidate SHA
 that has no marker at ${VERIFIED_MARKER_DIR}/<full-sha> (written by
-'deploy_candidate_enhanced.sh --verify-candidate' + '--record-verified'), OR
+'deploy_candidate_enhanced.sh --complete-verification' + '--record-verified'), OR
 whose currently-candidate-tagged revisions no longer match the digests
 recorded in <full-sha>.evidence, unless --skip-verification-check is passed
 explicitly (a deliberate operator override, not the default).
@@ -309,7 +333,7 @@ Steps --promote would run, in order:
      left in place at 0% traffic (same disposal policy as the candidate
      revisions -- available for investigation, never auto-deleted). No
      ephemeral candidate Pub/Sub queue resources are removed here -- those
-     were already deleted by --verify-candidate's own cleanup; this script
+     were already deleted by --complete-verification's own cleanup; this script
      never recreates or touches them.
   8) ROLLBACK REVISIONS: print the exact infrastructure/rollback.sh
      invocation using the prior revisions captured above, ready to run

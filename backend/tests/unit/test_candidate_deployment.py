@@ -39,6 +39,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+import fake_gcloud
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -61,10 +62,13 @@ _GIT_BASH_CANDIDATES = [
 BASH_EXECUTABLE = next((p for p in _GIT_BASH_CANDIDATES if Path(p).exists()), "bash")
 
 
-def _run_bash_script(relative_path: str, *args: str, timeout: int = 30) -> subprocess.CompletedProcess:
+def _run_bash_script(
+    relative_path: str, *args: str, timeout: int = 30, env: dict[str, str] | None = None
+) -> subprocess.CompletedProcess:
     return subprocess.run(
         [BASH_EXECUTABLE, relative_path, *args],
         cwd=REPO_ROOT,
+        env=env,
         capture_output=True,
         text=True,
         timeout=timeout,
@@ -73,7 +77,16 @@ def _run_bash_script(relative_path: str, *args: str, timeout: int = 30) -> subpr
 
 
 @pytest.fixture(scope="module")
-def enhanced_deploy_plan() -> subprocess.CompletedProcess:
+def offline_gcloud_env(tmp_path_factory) -> dict[str, str]:
+    """`gcloud` resolves to the in-memory fake (fake_gcloud.py): the dry-run
+    plans below perform a dozen live discovery calls (~5 s each), which made
+    these fixtures time out under load and let the test suite reach GCP. The
+    plan text under test does not depend on real project state."""
+    return fake_gcloud.make_offline_env(tmp_path_factory.mktemp("offline-gcloud"))
+
+
+@pytest.fixture(scope="module")
+def enhanced_deploy_plan(offline_gcloud_env) -> subprocess.CompletedProcess:
     """The default (no-flag) dry-run output, computed ONCE and shared across
     every test below that only inspects the printed plan -- this mode now
     performs real read-only `gcloud` discovery calls (by design; see the
@@ -83,7 +96,7 @@ def enhanced_deploy_plan() -> subprocess.CompletedProcess:
     access, `discover_production_state` still degrades gracefully (each call
     is wrapped in `... 2>/dev/null || echo '<not found>'`), so this remains a
     read-only, non-fatal call either way."""
-    return _run_bash_script("infrastructure/deploy_candidate_enhanced.sh", timeout=90)
+    return _run_bash_script("infrastructure/deploy_candidate_enhanced.sh", timeout=90, env=offline_gcloud_env)
 
 
 def test_enhanced_deploy_default_mode_never_mutates(enhanced_deploy_plan) -> None:
@@ -209,8 +222,8 @@ def test_enhanced_deploy_preflight_guards_exist_and_are_wired_in() -> None:
     assert 'configured_project != "$PROJECT_ID"' in text or "configured_project\" != \"$PROJECT_ID\"" in text
     assert "uncommitted changes" in text
     assert "unpushed tree" in text
-    # Called from both mutating entry points.
-    assert text.count("preflight_guards") >= 3  # definition + deploy_candidate + verify_candidate_async_path
+    # Called from every mutating entry point: deploy, prepare, complete, abort, record-verified.
+    assert text.count("preflight_guards") >= 6  # definition + the five entry points
 
 
 def test_enhanced_deploy_does_not_reference_disabled_legacy_secrets() -> None:
@@ -222,52 +235,51 @@ def test_enhanced_deploy_does_not_reference_disabled_legacy_secrets() -> None:
     assert "no --set-secrets mapping for FIREBASE_ADMIN_KEY or GEMINI_API_KEY" in text
 
 
-def test_enhanced_deploy_verify_candidate_never_modifies_real_subscription() -> None:
+def test_enhanced_deploy_verification_never_modifies_real_subscription() -> None:
     text = (REPO_ROOT / "infrastructure" / "deploy_candidate_enhanced.sh").read_text(encoding="utf-8")
-    assert "verify_candidate_async_path" in text
+    assert "prepare_verification" in text and "complete_verification" in text and "abort_verification" in text
     # No REAL `gcloud pubsub subscriptions modify-push-config` invocation --
-    # the only mention of "modify-push-config" is inside a comment/error
+    # the only mention of "modify-push-config" would be in a comment/error
     # message explaining that this script never does that.
     assert "gcloud pubsub subscriptions modify-push-config" not in text
+    assert "update-traffic" not in text.replace("No production traffic change ('gcloud run services update-traffic')", "")
 
 
-def test_enhanced_deploy_verify_candidate_uses_isolated_topic_not_production_topic() -> None:
-    """BLOCKER 2 regression: a prior version of this script created a
-    disposable *subscription* on the shared PRODUCTION topic (assurance-runs)
-    for verification. Pub/Sub fan-out means every subscription on a topic
-    receives every message published to it, so that subscription ALSO
-    delivered every verification message to the real production worker via
-    assurance-runs-worker-sub, racing it against the candidate worker and
-    proving nothing about which one actually processed it. Verification must
-    instead create its own SHA-scoped, fully isolated topic (never a
-    subscription directly on PROD_PUBSUB_TOPIC), and must retarget the
-    candidate API's own publish topic at it so a verification mission is
-    never published to the production topic in the first place."""
+def test_enhanced_deploy_verification_uses_isolated_topics_not_production_topics() -> None:
+    """BLOCKER 2 regression (extended to the impact path): an earlier version
+    created a disposable *subscription* on the shared PRODUCTION topic
+    (assurance-runs). Pub/Sub fan-out means every subscription on a topic
+    receives every message published to it, so the real production worker also
+    got every verification message. Verification must create its own SHA-scoped,
+    fully isolated MISSION and IMPACT topics (never a subscription directly on a
+    production topic) and retarget the candidate publishers at them."""
     text = (REPO_ROOT / "infrastructure" / "deploy_candidate_enhanced.sh").read_text(encoding="utf-8")
-    assert "VERIFY_TOPIC_PREFIX=" in text
-    assert 'gcloud pubsub topics create "$verify_topic"' in text
-    assert 'gcloud pubsub subscriptions create "$verify_sub"' in text
-    assert '--topic="$verify_topic"' in text
-    # The old defect: a subscription created directly on the production topic.
-    assert '--topic="$PROD_PUBSUB_TOPIC"' not in text
-    # The candidate API's publish target must actually be retargeted.
-    assert 'RATEGUARD_PUBSUB_TOPIC=${verify_topic}' in text
-    # And restored afterward, unconditionally (cleanup trap).
-    assert 'RATEGUARD_PUBSUB_TOPIC=${PROD_PUBSUB_TOPIC}' in text
-    assert "cleanup_verify_resources" in text
-    assert "gcloud pubsub topics delete" in text
+    assert 'VERIFY_TOPIC_PREFIX="assurance-runs-candidate-verify"' in text
+    assert 'VERIFY_IMPACT_TOPIC_PREFIX="impact-batches-candidate-verify"' in text
+    for var in ("MISSION_TOPIC", "IMPACT_VERIFY_TOPIC"):
+        assert f'gcloud pubsub topics create "${var}"' in text
+    for var in ("MISSION_SUB", "IMPACT_VERIFY_SUB"):
+        assert f'gcloud pubsub subscriptions create "${var}"' in text
+    assert '--topic="$MISSION_TOPIC"' in text and '--topic="$IMPACT_VERIFY_TOPIC"' in text
+    # The old defect: a subscription created directly on a production topic.
+    assert '--topic="$PROD_PUBSUB_TOPIC"' not in text and '--topic="$PROD_IMPACT_TOPIC"' not in text
+    # The candidate publishers' targets are retargeted...
+    assert '"RATEGUARD_PUBSUB_TOPIC=${MISSION_TOPIC}"' in text
+    assert text.count('"RATEGUARD_IMPACT_TOPIC=${IMPACT_VERIFY_TOPIC}"') == 2  # api + worker
+    # ...and restored from the recorded originals (never hardcoded production names).
+    assert "teardown_verification_environment" in text and "original_worker_impact_topic" in text
+    assert "gcloud pubsub topics delete" in text or 'gcloud pubsub "$kind" delete' in text
+    # Each temporary subscription pushes only to its own candidate-worker route.
+    assert '--push-endpoint="${worker_tagged_url}/internal/pubsub/assurance"' in text
+    assert '--push-endpoint="${worker_tagged_url}/internal/pubsub/impact-batch"' in text
 
 
-def test_enhanced_deploy_verify_candidate_oidc_audience_is_stable_untagged_url() -> None:
-    """BLOCKER 4 regression: a prior version of this script used the
-    candidate-tagged (--tag) worker URL as the Pub/Sub push OIDC audience,
-    which was never validated against real Cloud Run push-auth behavior.
-    The proven-working form used by this project's own live, functioning
-    impact-batches subscription (infrastructure/setup_impact_pubsub.sh) is
-    the service's STABLE, untagged base URL -- verification must use that
-    same form, not the movable tag URL."""
+def test_enhanced_deploy_verification_oidc_audience_is_stable_untagged_url() -> None:
+    """BLOCKER 4 regression: the proven-working audience form (see
+    infrastructure/setup_impact_pubsub.sh) is the service's STABLE, untagged base
+    URL -- never the movable --tag URL -- for BOTH temporary subscriptions."""
     text = (REPO_ROOT / "infrastructure" / "deploy_candidate_enhanced.sh").read_text(encoding="utf-8")
-    assert '--push-auth-token-audience="$worker_untagged_url"' in text
+    assert text.count('--push-auth-token-audience="$worker_untagged_url"') == 2
     assert '--push-auth-token-audience="$worker_tagged_url"' not in text
 
 
@@ -275,6 +287,7 @@ def test_enhanced_deploy_record_verified_pins_digests_for_promotion() -> None:
     text = (REPO_ROOT / "infrastructure" / "deploy_candidate_enhanced.sh").read_text(encoding="utf-8")
     assert "record_verified" in text
     assert ".evidence" in text
+    assert "VERIFICATION_COMPLETE=true" in text
     assert "RATING_ENGINE_DIGEST=" in text
     assert "WORKER_DIGEST=" in text
     assert "API_DIGEST=" in text
@@ -364,8 +377,8 @@ def test_rollback_supports_optional_rating_engine_revision() -> None:
 
 
 @pytest.fixture(scope="module")
-def promote_plan() -> subprocess.CompletedProcess:
-    return _run_bash_script("infrastructure/promote_candidate_to_production.sh", timeout=90)
+def promote_plan(offline_gcloud_env) -> subprocess.CompletedProcess:
+    return _run_bash_script("infrastructure/promote_candidate_to_production.sh", timeout=90, env=offline_gcloud_env)
 
 
 def test_promote_default_mode_captures_prior_revisions_for_rollback(promote_plan) -> None:
@@ -396,6 +409,7 @@ def test_promote_requires_a_verified_marker_by_default() -> None:
     assert "require_verified_marker" in text
     assert "--skip-verification-check" in text
     assert ".candidate-verified" in text
+    assert ".pending.json" in text and ".aborted" in text and "VERIFICATION_COMPLETE" in text
 
 
 def test_promote_rejects_staging_named_candidate_resources() -> None:

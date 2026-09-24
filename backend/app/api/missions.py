@@ -1,12 +1,13 @@
 import hashlib
 import json
 import logging
+import unicodedata
 import uuid
 from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from app.api.sources import source_accessible
 from app.auth import (
@@ -47,6 +48,25 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1", tags=["assurance-missions-v2"])
 
 
+MISSION_NAME_MAX_LENGTH = 120
+
+
+def normalize_mission_name(value: str) -> str:
+    """Trims a caller-supplied mission name and rejects an empty, over-long or
+    control-character-bearing one. (An *omitted* name never reaches here: the
+    field default applies.) Rendering safety is the client's job (React escapes),
+    but control/format characters (newlines, NUL, bidi overrides) are refused so
+    a name is always a single visible line in logs, evidence and the UI."""
+    trimmed = value.strip()
+    if not trimmed:
+        raise ValueError("Mission name must not be empty.")
+    if len(trimmed) > MISSION_NAME_MAX_LENGTH:
+        raise ValueError(f"Mission name must be at most {MISSION_NAME_MAX_LENGTH} characters.")
+    if any(unicodedata.category(ch) in ("Cc", "Cf") for ch in trimmed):
+        raise ValueError("Mission name must not contain control characters.")
+    return trimmed
+
+
 class CreateMissionRequest(BaseModel):
     """Payload for creating and initiating an Assurance Mission V2.
 
@@ -55,6 +75,8 @@ class CreateMissionRequest(BaseModel):
     MissionValidationService.validate_mission, not by a payload default.
     """
 
+    # Display/evidence metadata only: never consulted for authorization or by any
+    # decision logic. Normalised (trimmed, single-line, bounded) before it is stored.
     name: str = Field(default="Pricing Release Assurance Mission")
     mode: ComparisonMode = Field(default=ComparisonMode.RELEASE_CONFORMANCE)
     product: str = Field(default="AZ_HO3")
@@ -76,6 +98,11 @@ class CreateMissionRequest(BaseModel):
         default=False,
         description="Set only when the user explicitly opted into a built-in demo/sample source.",
     )
+
+    @field_validator("name")
+    @classmethod
+    def _normalize_name(cls, value: str) -> str:
+        return normalize_mission_name(value)
 
 
 def _validation_error(message: str, issues: list) -> HTTPException:

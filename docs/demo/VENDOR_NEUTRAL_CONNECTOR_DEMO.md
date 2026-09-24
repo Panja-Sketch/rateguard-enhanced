@@ -28,9 +28,10 @@ AZ HO3 engine and is not expected to pass.)
 
 ## Scenarios
 
-In the web app: **Sources** → upload the golden workbook → compile → **New mission** →
-Mode *Release conformance* → Source A = the compiled workbook, Source B = *API connector*
-`rating-engine-demo` with the version below.
+In the web app, on the **Sources** page: upload and compile the golden workbook as Source A, choose
+Source B = *API connector* `rating-engine-demo` with the version below, then **Execute Assurance**
+(release-conformance mode). The *New Mission* wizard offers bundled samples only. The optional **Mission name** field labels the mission
+(display/evidence only; blank keeps *Assurance Mission Launched from Sources*).
 
 ### A — Conformant release (`canonical-v1`) → `PASS`
 

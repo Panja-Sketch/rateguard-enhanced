@@ -14,6 +14,7 @@ import {
   listConnectors,
 } from '@/lib/api/client';
 import { SourceDescriptor, ValidationIssue } from '@/lib/types/assurance';
+import { CANDIDATE_VERIFY_NAME_FORMAT, MISSION_NAME_MAX_LENGTH, normalizeMissionName } from '@/lib/missionName';
 import {
   FileCode2,
   Upload,
@@ -54,6 +55,7 @@ export default function SourcesPage() {
   const [uploadingA, setUploadingA] = useState(false);
   const [uploadingB, setUploadingB] = useState(false);
   const [running, setRunning] = useState(false);
+  const [missionName, setMissionName] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [fieldIssuesA, setFieldIssuesA] = useState<ValidationIssue[]>([]);
   const [fieldIssuesB, setFieldIssuesB] = useState<ValidationIssue[]>([]);
@@ -147,6 +149,12 @@ export default function SourcesPage() {
       setError('Upload and compile both Source A and Source B before executing, or explicitly enable the demo sample.');
       return;
     }
+    // Optional display name; blank keeps the legacy default. The API re-validates.
+    const nameResult = normalizeMissionName(missionName);
+    if (!nameResult.ok) {
+      setError(nameResult.error);
+      return;
+    }
     setRunning(true);
     setError(null);
     try {
@@ -192,7 +200,7 @@ export default function SourcesPage() {
       const receipt = hasRealSources ? compiledA!.compilation_receipt : null;
 
       const res = await createAssuranceMission({
-        name: 'Assurance Mission Launched from Sources',
+        name: nameResult.value,
         mode: 'RELEASE_CONFORMANCE',
         product: receipt?.product || 'AZ_HO3',
         jurisdiction: receipt?.jurisdiction || 'Arizona',
@@ -599,6 +607,27 @@ export default function SourcesPage() {
             <p className="text-xs text-slate-400 mt-0.5">
               Launch agentic assurance workflow directly comparing compiled Source A against Source B.
             </p>
+            <div className="mt-3 space-y-1">
+              <label htmlFor="mission-name" className="text-xs font-bold text-slate-300">
+                Mission name <span className="font-normal text-slate-500">(optional)</span>
+              </label>
+              <input
+                id="mission-name"
+                data-testid="mission-name-input"
+                type="text"
+                value={missionName}
+                maxLength={MISSION_NAME_MAX_LENGTH}
+                onChange={(e) => setMissionName(e.target.value)}
+                placeholder="Assurance Mission Launched from Sources"
+                autoComplete="off"
+                spellCheck={false}
+                className="w-full rounded-lg border border-slate-800 bg-slate-950 px-3 py-2 text-xs text-white focus:border-sky-500 focus:outline-none"
+              />
+              <p className="text-[11px] text-slate-500">
+                Display label only. For a candidate verification mission paste{' '}
+                <span className="font-mono text-slate-400 break-all">{CANDIDATE_VERIFY_NAME_FORMAT}</span>.
+              </p>
+            </div>
           </div>
 
           <button

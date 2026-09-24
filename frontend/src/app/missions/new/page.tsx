@@ -4,6 +4,7 @@ import { useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { ApiError, createAssuranceMission, describeFetchError } from '@/lib/api/client';
 import { ComparisonMode, ValidationIssue } from '@/lib/types/assurance';
+import { MISSION_NAME_MAX_LENGTH, normalizeMissionName } from '@/lib/missionName';
 import {
   Play,
   Cpu,
@@ -81,8 +82,15 @@ export default function NewMissionPage() {
         name: sampleTargetType === 'CLEAN' ? 'Clean Compliant Target' : sourceBName,
       };
 
+      const nameResult = normalizeMissionName(name, 'Pricing Release Assurance Mission');
+      if (!nameResult.ok) {
+        setError(nameResult.error);
+        setLoading(false);
+        submitInFlightRef.current = false;
+        return;
+      }
       const payload = {
-        name,
+        name: nameResult.value,
         mode,
         product,
         jurisdiction,
@@ -351,6 +359,7 @@ export default function NewMissionPage() {
                 <input
                   type="text"
                   value={name}
+                  maxLength={MISSION_NAME_MAX_LENGTH}
                   onChange={(e) => setName(e.target.value)}
                   className="w-full rounded-lg border border-slate-800 bg-slate-950 px-3 py-2 text-xs text-white focus:border-sky-500 focus:outline-none"
                 />

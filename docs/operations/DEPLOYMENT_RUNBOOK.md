@@ -37,7 +37,7 @@ tested candidate); commands below are what those scripts run.
       candidate mission or impact batch. On any failure or signal it restores and deletes everything itself; on
       success it leaves the environment in place and prints the candidate web URL and instructions.
    2. **Observed manual mission** — in the candidate web URL, signed in with the usual demo-tenant account, create
-      a mission named `[CANDIDATE-VERIFY-<sha12>] controlled workbook vs versioned REST connector` (Source A: a
+      a mission named `[CANDIDATE-VERIFY-<sha12>] controlled workbook vs versioned REST connector` (paste it into the optional **Mission name** field on the Sources page; blank keeps the default name, which the verification refuses) (Source A: a
       controlled workbook; Source B: the versioned REST connector with an explicit engine version) and wait for
       a terminal decision. QUEUED/RUNNING/202 is not success.
    3. `--complete-verification --mission-id=<MIS-…>` — requires the pending-state file. Verifies the mission

@@ -1214,10 +1214,11 @@ Candidate web URL:         ${web_tagged_url}
 RUN ONE OBSERVED, SYNTHETIC MISSION (controlled workbook vs versioned REST connector):
   1. Open the candidate web URL above and sign in with your usual demo-tenant account
      in the browser. (Do not paste passwords or tokens into a terminal or this script.)
-  2. Create a mission named exactly:
+  2. On the SOURCES page, upload and compile a controlled workbook as Source A, choose the
+     versioned REST connector with an explicit engine version as Source B, and paste this
+     into the optional "Mission name" field (surrounding spaces are trimmed):
         [CANDIDATE-VERIFY-${short}] controlled workbook vs versioned REST connector
-     Source A: a controlled workbook (upload or pick an existing controlled workbook).
-     Source B: the versioned REST connector, with an explicit engine version.
+     Then press "Execute Assurance". (The New Mission wizard offers bundled samples only.)
   3. Wait until the mission reaches a terminal decision (QUEUED/RUNNING/202 is NOT success).
   4. Note the mission ID (MIS-XXXXXXXX), then run:
         $0 --complete-verification --mission-id=<MISSION_ID>

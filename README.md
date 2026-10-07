@@ -4,6 +4,24 @@ RateGuard AI is a vendor-neutral, agentic insurance pricing assurance platform. 
 
 **Production URL:** https://rateguard-web-nwhotixfva-uc.a.run.app
 
+## Origin and What Is New in This Version
+
+This repository (`rateguard-enhanced`) started from the public RateGuard AI baseline and was extended on top of it, in its own Google Cloud project (`rateguard-enhanced`) with its own isolated deployment. It is not the original deployment. The baseline provided the core idea (IPIR, semantic diff, premium oracle, bounded Gemini supervisor, 50,000-policy synthetic portfolio, Pub/Sub worker). The enhanced version adds:
+
+| Area | Baseline | Enhanced version (this repo) |
+| :--- | :--- | :--- |
+| Source ingestion | Native IPIR JSON; Excel/PDF adapters that did not verify uploaded content | Native IPIR JSON plus the **Controlled Workbook v1** (`.xlsx`) compiler with a fixed `RG_*` contract, ZIP/macro/OLE/external-link/formula safety checks and 21 negative fixtures. Legacy Excel and PDF uploads are rejected, not approximated |
+| IPIR | v0.1 | v0.2 contract (explicit currency, scale, rounding, control cases, attestation) lowered to v0.1 through a compatibility boundary; v0.1 hardened with `extra="forbid"` |
+| Target under test | Compiled source only | A **live REST rating-engine connector** (registered connectors only, SSRF-guarded) with two wire formats, a bundled demo rating engine service with canonical and defective engine versions, and optional `quote-batch-v1` batching |
+| Portfolio impact | Static predicate scan over BigQuery | **Connector-backed portfolio impact**: durable, leased, idempotent Pub/Sub plus Firestore batches with bounded concurrency/QPS, retry classification, circuit breaker, budgets, cancellation, cohort fairness screen and 30/60/90-day renewal impact |
+| Evidence | Firestore/GCS records | Tenant-scoped, deterministic `evidence-bundle-v1` ZIP with a SHA-256 manifest that fails closed on secret- or PII-shaped content |
+| Security | Open API | Firebase ID-token authentication verified server-side on ADC, server-assigned roles and tenants, tenant-scoped data and artifacts, Firestore rules tests, Firestore-backed rate limiting, private worker and rating engine, no stored service-account keys |
+| Gemini runtime | Earlier Gemini model | `gemini-3.1-flash-lite` on Vertex AI via the runtime service account only (no API key), with startup-validated guardrails |
+| Operations | Manual | Staged candidate-then-promote deployment, rollback scripts, log-based metrics, 7 alert policies, a dashboard, a budget alert, an IAM least-privilege inventory and runbooks |
+| Tests | Backend pytest and typecheck | Backend pytest with the Firestore emulator, Firestore rules tests, frontend Jest and Playwright browser tests, and a repository secret scan (`scripts/secret_scan.py`) |
+
+Everything below describes the enhanced version. The full change history is in `git log` and `docs/implementation/`.
+
 ## Positioning: RateGuard Complements Your Rating Platform, It Does Not Replace It
 
 > PricingCenter is where insurers author and configure rates. RateGuard is an independent assurance layer that
@@ -55,7 +73,7 @@ RateGuard runs a mandatory deterministic evidence pipeline unconditionally (vali
 | `PROPOSE_ALIGNMENT_OPTIONS` | Which confirmed differences are material to a future alignment decision — never a directional fix | Equivalence mode, whenever a difference is reproduced (neither source is presumed authoritative, so no patch is generated here — see below) |
 | `SELECT_REVALIDATION_TESTS` | Which targeted + regression tests to re-run against the proposed patch | Release Conformance mode, whenever a remediation is proposed |
 
-A judge running the standard demo path — a `RELEASE_CONFORMANCE` mission against the bundled defective target, ending in `BLOCK_DEPLOYMENT` — will see exactly **five** invocations in the Gemini Action Timeline: prioritization, boundary-test selection, evidence sufficiency, remediation proposal, and revalidation selection. Portfolio justification and extraction strategy are real code paths but conditional on the specific mission (respectively: zero reproduced mismatches, and an ambiguous uploaded source), so they won't appear in that run — this table describes what exists in the code, and the sentence above describes what one concrete production mission actually shows.
+Someone running the standard demo path — a `RELEASE_CONFORMANCE` mission against the bundled defective target, ending in `BLOCK_DEPLOYMENT` — will see exactly **five** invocations in the Gemini Action Timeline: prioritization, boundary-test selection, evidence sufficiency, remediation proposal, and revalidation selection. Portfolio justification and extraction strategy are real code paths but conditional on the specific mission (respectively: zero reproduced mismatches, and an ambiguous uploaded source), so they won't appear in that run — this table describes what exists in the code, and the sentence above describes what one concrete production mission actually shows.
 
 Every Gemini call is schema-validated structured output, and Gemini may **only select IDs from a candidate pool a deterministic engine already produced** — it can never invent a finding, a test scenario, or a dollar figure. Every mission is capped at `MAX_GEMINI_CALLS_PER_MISSION` calls. If Gemini is unavailable or returns an invalid response, every decision point has a deterministic fallback (e.g. "retain all differences," "use optimizer-selected tests") so a mission never stalls on an LLM outage — and the UI honestly reports which path was taken (`is_gemini_decision` / `is_fallback` on every logged action).
 
@@ -65,7 +83,7 @@ When two sources are found to be fully equivalent with **zero** AST diffs, Gemin
 
 ```mermaid
 flowchart TB
-    User(["User / Judge browser"])
+    User(["User browser"])
     Web["Next.js 14 Frontend<br/>(Cloud Run: rateguard-web)"]
     API["FastAPI API<br/>(Cloud Run: rateguard-api, public)"]
     Topic[["Pub/Sub topic<br/>assurance-runs"]]
@@ -245,7 +263,7 @@ The most differentiated part of RateGuard, and the part that answers "what makes
 
 ## External API Access
 
-The core "validate via API" pitch needs an external, non-browser way to call RateGuard, not just a UI to click through. Every business route already requires a verified Firebase bearer token with a server-assigned role (see the Authentication bullet under Limitations below); on top of that, an optional **scoped, read-only demo API key** lets a judge's or insurer's own script or CI/CD pipeline call the API directly:
+The core "validate via API" pitch needs an external, non-browser way to call RateGuard, not just a UI to click through. Every business route already requires a verified Firebase bearer token with a server-assigned role (see the Authentication bullet under Limitations below); on top of that, an optional **scoped, read-only demo API key** lets an evaluator's or insurer's own script or CI/CD pipeline call the API directly:
 
 ```bash
 curl -H "X-RateGuard-Api-Key: $RATEGUARD_DEMO_API_KEY" \
@@ -314,57 +332,41 @@ Deployment to Google Cloud Run follows a staged pipeline, implemented in `infras
 3. Run the same wizard again with the **clean control** target — expect `PASS` with zero diffs, and note the "Gemini not invoked by design" messaging.
 4. Pick **Equivalence** mode and run it — note that Material Findings, Blast Radius, and every other tab use neutral "Source A" / "Source B" language throughout, never "intent" or "defective." Open the **Alignment Options** tab: no directional patch exists yet (Gemini's decision there was the neutral `PROPOSE_ALIGNMENT_OPTIONS`, not a proposed fix) — pick either Source A or Source B as the reference to generate one on demand, then pick the other to see the patch flip direction.
 5. Visit **Sources**, download the two sample `.json` templates (or upload your own — see [Supported Source Format: JSON Schema](#supported-source-format-json-schema)), compile them for Source A and B, review the compilation receipt for each, and launch a mission from the real compiled sources.
-6. Open the mission detail page and walk the tabs: Material Findings, Dependency DAG, Boundary Experiments, Reconciliation & RCA, Blast Radius, Remediation & Revalidation (Alignment Options in Equivalence mode), Evidence Lineage, and the Gemini Action Timeline.
+6. On **Sources**, download `rateguard-workbook-sample.xlsx`, compile it as Source A, then launch a **Release Conformance** mission with a registered connector as Source B (`rating-engine-demo`, engine `defective-v1`) — expect `BLOCK_DEPLOYMENT` with a connector-backed portfolio impact (affected policies, undercharge, 30/60/90-day renewals, cohort screen) and an exportable evidence bundle. Engine `canonical-v1` should `PASS`.
+7. Open the mission detail page and walk the tabs: Material Findings, Dependency DAG, Boundary Experiments, Reconciliation & RCA, Blast Radius, Remediation & Revalidation (Alignment Options in Equivalence mode), Evidence Lineage, and the Gemini Action Timeline.
 
-## Screenshots & Video
+## Results
+
+Results below come from the enhanced deployment (connector-backed missions against the bundled rating engine, synthetic data only). Mission IDs and figures are the ones recorded during live acceptance in [docs/implementation/STATUS.md](docs/implementation/STATUS.md).
+
+<!-- RESULTS-SCREENSHOTS-TODO: add the screenshots here. Save images in docs/media/ and reference them as ![alt](docs/media/<file>.png). -->
+
+| Scenario | Mission | Decision | Key figures |
+| :--- | :--- | :--- | :--- |
+| Clean workbook vs `canonical-v1` connector | `MIS-8DB4C882` | `PASS` | Impact `COMPLETE`; 37,533 eligible policies compared, 0 mismatches, 12,467 out of scope (effective dates outside the workbook's period) |
+| Clean workbook vs `defective-v1` connector | `MIS-BC3FDB58` | `BLOCK_DEPLOYMENT` | 13,446 affected policies, undercharge of $605,070.00 (every affected policy is $45.00 low); renewals affected within 30/60/90 days: 953 / 1,277 / 1,365; identical to the package-vs-package result on the same in-period policies |
+| `canonical-v1` with 15% injected transient faults | `MIS-71C2B921` | `REVIEW_REQUIRED` | Impact `PARTIAL`, coverage 66.88%, 4,726 inconclusive; an incomplete scan never passes |
+| `defective-v1` with injected faults | `MIS-102F8076` | `BLOCK_DEPLOYMENT` | Impact `PARTIAL`; exposure reported as a **lower bound** of $404,640.00 at 62.09% coverage |
+| Worker rollback mid-scan (disaster-recovery drill) | `MIS-210F8560` | `BLOCK_DEPLOYMENT` | Scan ended `PARTIAL` (228 of 250 batches); results not corrupted or double counted |
+| Final clean run after all drills | `MIS-4C39BD71` | `PASS` | Impact `COMPLETE` |
 
 ### Demo Video
 
-[▶ Watch the RateGuard AI Demo on YouTube](https://youtu.be/XqSU7EnHy3w)
+<!-- VIDEO-TODO: demo video for the enhanced version will be added here. -->
 
-### Release Conformance — BLOCK_DEPLOYMENT
-
-RateGuard detects semantic pricing drift, reproduces the premium mismatch, identifies the root cause, quantifies portfolio impact, and blocks the unsafe release.
-
-![RateGuard BLOCK_DEPLOYMENT](docs/media/rateguard-block-deployment.png)
-
-### Production Architecture
-
-RateGuard runs as an asynchronous Google Cloud architecture using Cloud Run, Pub/Sub, Firestore, BigQuery, Cloud Storage, and Gemini on Vertex AI.
-
-![RateGuard Architecture](docs/media/rateguard-architecture.png)
-
-### Reconciliation & Root Cause Analysis
-
-The deterministic reconciliation engine identifies the first pricing node where the two implementations diverge.
-
-![RateGuard Reconciliation](docs/media/rateguard-reconciliation.png)
-
-### Portfolio Blast Radius
-
-Confirmed pricing defects are evaluated against the synthetic 50,000-policy Arizona HO3 portfolio.
-
-![RateGuard Blast Radius](docs/media/rateguard-blast-radius.png)
-
-### Gemini Action Timeline
-
-Gemini is used only at bounded, schema-validated decision points while deterministic engines provide the pricing evidence.
-
-![Gemini Action Timeline](docs/media/rateguard-gemini-timeline-1.png)
-![Gemini Action Timeline](docs/media/rateguard-gemini-timeline-2.png)
-
-### Clean Control — PASS
-
-Equivalent sources return PASS with zero semantic differences and show “Gemini not invoked by design.”
-
-![RateGuard PASS](docs/media/rateguard-pass.png)
-
+Not yet recorded for this version.
 
 ## Test Results
 
-- **Backend:** 389 tests passing (`pytest`), covering mission lifecycle, validation, the Gemini supervisor's decision points and fallback paths (including the conservative-release gates below and the on-demand Equivalence-mode alignment endpoint), Pub/Sub worker delivery/idempotency, cross-process artifact storage, and API-level contract tests.
-- **Frontend:** clean `tsc --noEmit` typecheck across the app.
-- **Deployed acceptance tests** (`scripts/verify_deployed_system.py`, `docs/demo/DEPLOYED_ACCEPTANCE_TEST.md`): clean `RELEASE_CONFORMANCE` run → `PASS`; defective `RELEASE_CONFORMANCE` run → `BLOCK_DEPLOYMENT` with a quantified blast radius; symmetric `EQUIVALENCE` run in both directions → matching `PASS`.
+Last verified run is recorded in [docs/implementation/STATUS.md](docs/implementation/STATUS.md) (2026-09-21, final worktree):
+
+- **Backend:** ruff clean; about 1,158 pytest tests passing with the Firestore emulator required and no skips.
+- **Firestore security rules:** 130 of 130 passing, including the `impact_jobs` collection.
+- **Frontend:** typecheck, lint, production build, Jest 64 of 64, and Playwright 10 of 10.
+- **Repository secret scan:** `python scripts/secret_scan.py` reports clean.
+- **Live acceptance** (`backend/scripts/live_acceptance_p8.py`): the missions in the Results table above, plus authentication and RBAC checks (viewer 403 on export and create, cross-tenant 404, unauthenticated 401), CORS allow and deny, private worker and rating engine (403 unauthenticated), authenticated Pub/Sub push, rate limiting (5 successes then 429), and evidence-bundle hash verification.
+
+Counts change as tests are added; re-run `cd backend && pytest` and `cd frontend && npm test` for current numbers.
 
 ## Conservative Release Decision
 
@@ -392,7 +394,7 @@ RateGuard is scoped to what it can verify end-to-end, not what would look impres
 - **Source ingestion supports native IPIR JSON and the Controlled Workbook v1 `.xlsx` contract today.** Arbitrary/legacy Excel and PDF adapter code exists (`backend/app/adapters/`) but is not exposed through the API — extraction accuracy against real filings hasn't been proven, so uploads are rejected rather than silently approximated. YAML/CSV have no adapter at all.
 - **The 50,000-policy portfolio is synthetic**, generated for demo/testing purposes (`data/portfolio/`) — it is not real production policy data, and blast-radius dollar figures are illustrative of the methodology, not an actual carrier's exposure.
 - **Gemini's discretion is narrow by design.** It selects among deterministically-generated candidates at a handful of fixed pipeline stages; it never performs pricing arithmetic and can't be prompted into doing so. This is a deliberate scope boundary, not a current gap — see [The Deterministic Boundary](#the-deterministic-boundary).
-- **Single-tenant, single-region deployment.** The API *does* enforce authentication and role-based authorization on every business route: requests must carry a `Authorization: Bearer <Firebase ID token>`, which is verified server-side (Firebase Admin + ADC) and matched against a server-controlled user directory that assigns role (`ADMIN` / `RELEASE_OWNER` / `CONSUMER_REVIEWER` / `VIEWER`) and tenant — never taken from the token's custom claims, request body, or any other header. Unauthenticated or unrecognized-user requests fail closed with `401`/`403` (see `backend/app/auth/dependencies.py` and `docs/security/AUTHORIZATION_MATRIX.md`). An optional scoped, read-only demo API key (off by default) now exists for external scripts — see [External API Access](#external-api-access) — and `/docs`/`/openapi.json` are intentionally left open for hackathon-demo transparency. What's still missing for production: multi-tenant data isolation beyond the directory's `tenant_id` field — this is a hackathon-scope deployment, not a hardened multi-customer SaaS product.
+- **Single-region deployment with one challenge tenant.** The API *does* enforce authentication and role-based authorization on every business route: requests must carry a `Authorization: Bearer <Firebase ID token>`, which is verified server-side (Firebase Admin + ADC) and matched against a server-controlled user directory that assigns role (`ADMIN` / `RELEASE_OWNER` / `CONSUMER_REVIEWER` / `VIEWER`) and tenant — never taken from the token's custom claims, request body, or any other header. Unauthenticated or unrecognized-user requests fail closed with `401`/`403` (see `backend/app/auth/dependencies.py` and `docs/security/AUTHORIZATION_MATRIX.md`). An optional scoped, read-only demo API key (off by default) now exists for external scripts — see [External API Access](#external-api-access) — and `/docs`/`/openapi.json` are intentionally left open for demo transparency. Records and artifacts are scoped by the directory's `tenant_id` (cross-tenant access returns 404, verified live). What's still missing for production: a self-service tenant and user management plane — this is a demo-scope deployment, not a hardened multi-customer SaaS product.
 - **Portfolio exposure calculations run against one synthetic Arizona HO3 dataset.** Other lines of business (auto, commercial) can compile and compare via IPIR, but the bundled 50K-policy blast-radius dataset is specific to this one product/jurisdiction; a different line's portfolio scan needs its own dataset wired in.
 
 ## License
@@ -404,25 +406,38 @@ MIT — see [LICENSE](./LICENSE).
 ```
 backend/            FastAPI application, agents, deterministic engines, tests
   app/
-    agents/          AssuranceSupervisor + Gemini decision client
-    api/             REST endpoints (missions, sources, assurance, health)
-    adapters/        Source format adapters (JSON, Excel, PDF, platform config)
-    engines/         Deterministic diff, impact, oracle, testing, reconciliation, portfolio engines
-    ipir/            IPIR schema, package model, validation
-    models/           Pydantic domain models
-    services/        Validation, remediation, mission transition services
-    storage/         Firestore/BigQuery/GCS/Pub/Sub adapters
-  scripts/            Fixture generators, demo runners, deploy-time verification scripts
-  tests/              Unit, API, and agent test suites
+    agents/          AssuranceSupervisor + Gemini decision client and tool registry
+    api/             REST endpoints (missions, sources, connectors, assurance, explanations, session, health)
+    auth/            Firebase token verification, server-side user directory, roles, tenancy
+    adapters/        Legacy source adapters (JSON adapter live; Excel/PDF/platform-config not reachable via upload)
+    connectors/      Registered REST connector client, wire-format adapters, SSRF guard, retry, redaction, health
+    engines/         Deterministic diff, impact, oracle, testing, reconciliation, portfolio, target engines
+    explanations/    Draft customer-explanation generation for human review
+    impact/          Connector-backed portfolio impact: coordinator, batch processor, store, aggregate, resilience
+    ingestion/       Controlled Workbook v1 compiler (workbook_v1/)
+    ipir/            IPIR v0.1 schema plus the v0.2 contract and compatibility lowering
+    messaging/       Pub/Sub publisher, worker, delivery outcomes
+    ratelimit/       Firestore-backed per-tenant/user rate limiting
+    models/          Pydantic domain models
+    services/        Validation, remediation, evidence bundle, mission services
+    storage/         Firestore, BigQuery, GCS and local/in-memory stores
+  rating_engine/     Separate demo rating-engine service (canonical and defective engine versions, vendor-gateway wire format)
+  scripts/           Fixture generators, demo runners, candidate/deployment verification, live acceptance
+  tests/             Unit, API, auth, connector, impact, ingestion, agent and integration suites
 frontend/            Next.js 14 (App Router) + TypeScript + Tailwind web UI
-  src/app/            Pages (missions, sources, architecture)
-  src/components/     Assurance UI components (diff viewer, impact graph, evidence lineage, ...)
-  src/lib/            API client and shared types
-  public/samples/     Downloadable IPIR JSON source templates (clean + intentional-drift pair)
-infrastructure/      Enhanced candidate deploy + rollback scripts, Firestore rules/indexes, runtime config
+  src/app/            Pages (missions, sources, architecture, positioning, demo, login)
+  src/components/     Assurance and auth UI components
+  src/lib/            API client, Firebase/auth helpers, shared types
+  public/samples/     Downloadable IPIR JSON templates and Controlled Workbook v1 samples (clean and drift pairs)
+  e2e/                Playwright browser tests
+infrastructure/      Candidate deploy, promote and rollback scripts, Firestore rules/indexes and rules tests, monitoring setup, runtime config
 docs/
   architecture/       Per-subsystem architecture specifications
-  demo/               Demo kit and acceptance test guide
-data/                 Synthetic Arizona HO3 demo/test fixtures (rate spec, IPIR packages, 50K portfolio)
-scripts/              Deployed-system verification script
+  demo/               Demo kit and acceptance results
+  implementation/     Plan, decisions and verified status log
+  operations/         Deployment, monitoring and rollback/DR runbooks
+  security/           Authorization matrix and IAM inventory
+  media/              README screenshots
+data/                 Synthetic Arizona HO3 fixtures (rate spec, IPIR packages, workbook samples, 50K portfolio)
+scripts/              Repository secret scan and deployed-system verification
 ```

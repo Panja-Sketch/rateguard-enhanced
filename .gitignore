@@ -102,3 +102,6 @@ ui-debug.log
 # Release deployment bookkeeping (local)
 infrastructure/.release-digests.env
 infrastructure/.previous-revisions.env
+
+# Local agent/tooling scratch (worktrees, emulator logs, scheduler locks)
+.claude/

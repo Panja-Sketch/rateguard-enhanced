@@ -7,7 +7,7 @@ the Monitoring / Logging / Billing Budgets REST APIs. No secrets are read or
 printed. Metric labels are deliberately low-cardinality (decision, status, code,
 decision_type) - never tenant, mission, user or policy identifiers.
 
-    python infrastructure/monitoring/setup_monitoring.py [--email you@example.com]
+    python infrastructure/monitoring/setup_monitoring.py --email you@example.com
 
 Budget alerts do NOT cap spending; they only notify.
 """
@@ -275,7 +275,7 @@ def ensure_budget(channel: str | None) -> None:
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("--email", default="panjacharans@gmail.com")
+    ap.add_argument("--email", required=True, help="alert recipient (no default: never hard-code a personal address)")
     ap.add_argument("--skip-budget", action="store_true")
     args = ap.parse_args()
     ensure_metrics()

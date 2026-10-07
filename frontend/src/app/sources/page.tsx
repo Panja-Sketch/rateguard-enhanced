@@ -370,7 +370,7 @@ export default function SourcesPage() {
             <code className="text-sky-300">outputs</code>. Unknown or misnamed top-level fields (e.g. a friendly{' '}
             <code className="text-rose-300">rating_tables</code> instead of <code className="text-sky-300">tables</code>) are
             rejected with a schema error, never silently dropped. See the full schema and a worked example in the{' '}
-            <a href="https://github.com/Panja-Sketch/rateguard-ai#supported-source-format-json-schema" target="_blank" rel="noreferrer" className="underline text-sky-300">README</a>.
+            <a href="https://github.com/Panja-Sketch/rateguard-enhanced#supported-source-format-json-schema" target="_blank" rel="noreferrer" className="underline text-sky-300">README</a>.
           </p>
         </div>
       </div>
@@ -431,7 +431,7 @@ export default function SourcesPage() {
             passing case is required for a <code className="text-emerald-300">VERIFIED</code> compilation, not just a
             structurally valid one). Only <code className="text-emerald-300">USD</code>/<code className="text-emerald-300">US-AZ</code> are
             in scope for this deployment today. See the full contract and worked example in the{' '}
-            <a href="https://github.com/Panja-Sketch/rateguard-ai#supported-source-format-controlled-workbook-v1-xlsx" target="_blank" rel="noreferrer" className="underline text-emerald-300">README</a>.
+            <a href="https://github.com/Panja-Sketch/rateguard-enhanced#supported-source-format-controlled-workbook-v1-xlsx" target="_blank" rel="noreferrer" className="underline text-emerald-300">README</a>.
           </p>
         </div>
         <div className="rounded-lg border border-rose-900/60 bg-rose-950/20 p-3 text-xs text-rose-200 flex items-start gap-2">

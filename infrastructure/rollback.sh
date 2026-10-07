@@ -19,6 +19,7 @@ REGION="us-central1"
 API_REVISION=""
 WORKER_REVISION=""
 WEB_REVISION=""
+RATING_ENGINE_REVISION=""
 ROLLBACK=false
 
 for arg in "$@"; do
@@ -27,15 +28,19 @@ for arg in "$@"; do
     --api-revision=*) API_REVISION="${arg#*=}" ;;
     --worker-revision=*) WORKER_REVISION="${arg#*=}" ;;
     --web-revision=*) WEB_REVISION="${arg#*=}" ;;
+    --rating-engine-revision=*) RATING_ENGINE_REVISION="${arg#*=}" ;;
     --help|-h)
-      echo "Usage: $0 --api-revision=<name> --worker-revision=<name> --web-revision=<name> [--rollback]"
+      echo "Usage: $0 --api-revision=<name> --worker-revision=<name> --web-revision=<name> [--rating-engine-revision=<name>] [--rollback]"
       echo "  (no --rollback)  Print the exact rollback commands. No GCP calls."
       echo "  --rollback       Actually execute the rollback."
+      echo "  --rating-engine-revision is optional -- omit it if rating-engine wasn't part of"
+      echo "  the promotion being rolled back."
       echo ""
       echo "Find previous revision names with, per service:"
       echo "  gcloud run revisions list --service rateguard-api --region $REGION"
       echo "  gcloud run revisions list --service rateguard-worker --region $REGION"
       echo "  gcloud run revisions list --service rateguard-web --region $REGION"
+      echo "  gcloud run revisions list --service rateguard-rating-engine --region $REGION"
       exit 0
       ;;
   esac
@@ -49,13 +54,14 @@ if [ -z "$API_REVISION" ] || [ -z "$WORKER_REVISION" ] || [ -z "$WEB_REVISION" ]
   echo "  gcloud run revisions list --service rateguard-api --region $REGION"
   echo "  gcloud run revisions list --service rateguard-worker --region $REGION"
   echo "  gcloud run revisions list --service rateguard-web --region $REGION"
+  echo "  gcloud run revisions list --service rateguard-rating-engine --region $REGION"
   exit 2
 fi
 
 cat <<PLAN
 ========================================================
    RateGuard AI -- Immediate Rollback
-   Target revisions: api=${API_REVISION} worker=${WORKER_REVISION} web=${WEB_REVISION}
+   Target revisions: api=${API_REVISION} worker=${WORKER_REVISION} web=${WEB_REVISION} rating-engine=${RATING_ENGINE_REVISION:-<not rolled back>}
 ========================================================
 gcloud run services update-traffic rateguard-api --region ${REGION} \\
   --to-revisions=${API_REVISION}=100
@@ -65,17 +71,27 @@ gcloud run services update-traffic rateguard-worker --region ${REGION} \\
 
 gcloud run services update-traffic rateguard-web --region ${REGION} \\
   --to-revisions=${WEB_REVISION}=100
+PLAN
 
+if [ -n "$RATING_ENGINE_REVISION" ]; then
+  cat <<PLAN2
+gcloud run services update-traffic rateguard-rating-engine --region ${REGION} \\
+  --to-revisions=${RATING_ENGINE_REVISION}=100
+
+PLAN2
+fi
+
+cat <<PLAN3
 Verify immediately after:
   curl <production-api-url>/health/ready
   gcloud logging read 'resource.labels.service_name="rateguard-worker" severity>=ERROR' --freshness=10m
 
 This rollback ONLY changes production traffic split. It never touches
-assurance-runs-staging / assurance-worker-staging / the candidate tag, and
-never deletes the candidate revision (it stays at 0% traffic, available for
-further investigation).
+assurance-runs-worker-sub / impact-batches-worker-sub / the candidate tag,
+and never deletes the candidate revision (it stays at 0% traffic, available
+for further investigation).
 ========================================================
-PLAN
+PLAN3
 
 if [ "$ROLLBACK" = true ]; then
   echo ""

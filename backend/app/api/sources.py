@@ -1,3 +1,4 @@
+import hashlib
 from typing import Any
 
 from fastapi import APIRouter, Depends, File, HTTPException, Response, UploadFile, status
@@ -48,6 +49,20 @@ def source_accessible(source_id: str, user: AuthenticatedUser) -> bool:
         return True
     key = _artifact_key(user, source_id, source_id)
     return key is not None and get_artifact_store().exists(key)
+
+
+def uploaded_source_sha256(source_id: str, user: AuthenticatedUser) -> str | None:
+    """SHA-256 of an uploaded source's raw bytes, read from the caller's OWN tenant
+    artifact prefix. Server-derived so mission evidence records the real content
+    hash of the controlled workbook and never a browser-supplied value; None for
+    bundled fixtures, connectors or anything not uploaded by this tenant."""
+    if not source_id.startswith(_UPLOADED_SOURCE_PREFIX):
+        return None
+    key = _artifact_key(user, source_id, source_id)
+    if key is None:
+        return None
+    content = get_artifact_store().get_artifact_content(key)
+    return hashlib.sha256(content).hexdigest() if content is not None else None
 
 
 def _validation_error_detail(exc: ValidationError) -> dict[str, Any]:

@@ -8,9 +8,8 @@ silently broken demo engine.
 
 from datetime import date
 
-from app.ipir.enums import TransactionType
 from rating_engine.engines.quote_service import execute_quote
-from rating_engine.models import QuoteRequest
+from rating_engine.models import QuoteRequest, TransactionType
 
 GOLDEN_CASE_INPUTS = {"roof_age": 25, "dwelling_limit": "300000.00"}
 GOLDEN_EFFECTIVE_DATE = date(2026, 10, 1)

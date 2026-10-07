@@ -12,10 +12,12 @@ Administration to "minimal connector and threshold display", not full
 management; a persistent, mutable connector store is a frontend/future-
 session concern, not this session's.
 
-Exactly one real entry is registered: the `backend/rating_engine` demo
-service, with `canonical-v1`/`defective-v1` as its declared allowed engine
-versions, mirroring `backend/rating_engine/engines/registry.py`'s own
-two-version registry exactly.
+Exactly one real service is registered (under two wire shapes): the
+`backend/rating_engine` demo service ("RateGuard Demo Insurer Rating Engine",
+a black-box REST reference engine), with `canonical-v1`/`defective-v1` as its
+declared allowed engine versions, mirroring the versions the engine itself
+serves (`rating_engine/engines/versions.py`). RateGuard knows the engine only
+through this registry and the REST contract, never through its code.
 
 `select_connector` is the only mission-facing selection function. It takes
 a `connector_id` and an `engine_version` — never a URL — and fails closed
@@ -27,8 +29,9 @@ from __future__ import annotations
 
 from urllib.parse import urlsplit
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, model_validator
 
+from app.connectors.auth_config import entry_problems, normalize_audience
 from app.connectors.errors import ConnectorException, ConnectorFailureCategory
 from app.core.config import get_settings
 
@@ -56,6 +59,10 @@ class ConnectorRegistryEntry(BaseModel):
     auth_token_env_var: str | None = None
     # "none" | "google_id_token" (see Settings.rating_engine_connector_auth_mode).
     auth_mode: str = "none"
+    # Google ID-token audience: the stable (untagged) service URL. Configured
+    # explicitly; never derived from `base_url` (which may be a traffic-tagged
+    # candidate endpoint). Required for `google_id_token`, forbidden otherwise.
+    audience: str | None = None
     # Which wire shape `app.connectors.client` speaks to this target's
     # single-quote endpoint (batch/capabilities are always the RateGuard-
     # native shape today; no registered target advertises a differently-
@@ -65,6 +72,15 @@ class ConnectorRegistryEntry(BaseModel):
     # contract (`rating_engine.vendor_gateway`) proving the client adapts to
     # more than one shape, not just its own contract under a new name.
     wire_format: str = "rateguard_native_v1"
+
+    @model_validator(mode="after")
+    def _validate_auth_configuration(self) -> ConnectorRegistryEntry:
+        problems = entry_problems(self.connector_id, self.base_url, self.is_local_dev, self.auth_mode, self.audience)
+        if problems:
+            raise ValueError("; ".join(problems))
+        if self.audience:
+            object.__setattr__(self, "audience", normalize_audience(self.audience))
+        return self
 
     def host_and_port(self) -> tuple[str, int]:
         parts = urlsplit(self.base_url)
@@ -135,13 +151,14 @@ def _build_registry() -> dict[str, ConnectorRegistryEntry]:
     settings = get_settings()
     demo_entry = ConnectorRegistryEntry(
         connector_id="rating-engine-demo",
-        display_name="RateGuard Demo Rating Engine",
+        display_name="RateGuard Demo Insurer Rating Engine (black-box REST reference)",
         base_url=settings.rating_engine_connector_base_url,
         allowed_engine_versions=("canonical-v1", "defective-v1"),
         is_local_dev=settings.rating_engine_connector_is_local_dev,
         auth_header_name=settings.rating_engine_connector_auth_header_name,
         auth_token_env_var=settings.rating_engine_connector_auth_token_env_var,
         auth_mode=settings.rating_engine_connector_auth_mode,
+        audience=settings.rating_engine_connector_audience,
         wire_format="rateguard_native_v1",
     )
     vendor_gateway_entry = ConnectorRegistryEntry(
@@ -153,6 +170,7 @@ def _build_registry() -> dict[str, ConnectorRegistryEntry]:
         auth_header_name=settings.rating_engine_connector_auth_header_name,
         auth_token_env_var=settings.rating_engine_connector_auth_token_env_var,
         auth_mode=settings.rating_engine_connector_auth_mode,
+        audience=settings.vendor_gateway_connector_audience or settings.rating_engine_connector_audience,
         wire_format="vendor_gateway_v1",
     )
     return {entry.connector_id: entry for entry in (demo_entry, vendor_gateway_entry)}

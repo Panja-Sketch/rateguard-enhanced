@@ -48,6 +48,9 @@ dist/
 .env.*
 *.deploy-env.yaml
 infrastructure/.candidate-env.yaml
+infrastructure/.candidate-enhanced-env-api.yaml
+infrastructure/.candidate-enhanced-env-worker.yaml
+infrastructure/.candidate-verified/
 !.env.example
 !**/.env.example
 

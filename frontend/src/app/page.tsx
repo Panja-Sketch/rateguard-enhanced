@@ -80,7 +80,7 @@ export default function HomePage() {
               href="/positioning"
               className="inline-flex items-center gap-2 rounded-lg border border-slate-700 bg-slate-800 px-5 py-2.5 text-sm font-semibold text-slate-200 hover:bg-slate-750 transition-all"
             >
-              How RateGuard Complements PricingCenter
+              How RateGuard Complements Rating Platforms
             </Link>
             <Link
               href="/architecture"

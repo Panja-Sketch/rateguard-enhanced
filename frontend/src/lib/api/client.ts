@@ -7,9 +7,9 @@ import {
   WorkflowEvent,
 } from '../types/assurance';
 import { getAuthToken, notifyUnauthorized } from '../auth/session';
+import { getApiBaseUrl } from '../runtimeConfig';
 
-const BASE_URL =
-  process.env.NEXT_PUBLIC_RATEGUARD_API_URL || 'http://localhost:8000';
+const BASE_URL = getApiBaseUrl();
 
 export class ApiError extends Error {
   status: number;

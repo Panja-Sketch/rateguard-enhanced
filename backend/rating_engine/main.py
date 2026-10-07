@@ -1,9 +1,11 @@
-"""The isolated demo rating-engine service entry point (locked doc sections
-8.3, 12.2). Not unauthenticated in a real deployment — per section 12.2 this
-service is "private/authenticated if deployed separately; no public
-anonymous invocation" — but authentication/networking wiring is out of scope
-for this session (see docs/implementation/DECISIONS.md, D3) and is added
-alongside the connector client in a later session.
+"""RateGuard Demo Insurer Rating Engine: a black-box REST reference engine.
+
+An independently deployable service that prices the Arizona HO3 demo plan
+behind a versioned REST contract. It imports nothing from RateGuard. In a
+deployment it is private (Cloud Run IAM; no anonymous invocation) - the
+platform authenticates callers before a request reaches this code, and this
+service never reads a caller-supplied identity, tenant or authorization field.
+This is a vendor-neutral REST reference, not a Guidewire or Duck Creek adapter.
 """
 
 import logging
@@ -19,9 +21,8 @@ from rating_engine.engines.quote_service import (
     execute_quote,
     execute_quote_batch,
 )
-from rating_engine.engines.registry import UnknownEngineVersionError, known_engine_versions
+from rating_engine.engines.versions import UnknownEngineVersionError, known_engine_versions
 from rating_engine.models import (
-    BATCH_MAX_ITEMS,
     BATCH_SCHEMA_VERSION,
     BatchQuoteRequest,
     BatchQuoteResponse,
@@ -30,6 +31,7 @@ from rating_engine.models import (
     VendorGatewayQuoteRequest,
     VendorGatewayQuoteResponse,
 )
+from rating_engine.provenance import SERVICE_NAME, capabilities_document, provenance
 from rating_engine.startup_selftest import run_startup_selftest
 from rating_engine.vendor_gateway import handle_vendor_quote
 
@@ -50,7 +52,7 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="RateGuard Demo Rating Engine", lifespan=lifespan)
+app = FastAPI(title=SERVICE_NAME, lifespan=lifespan)
 
 
 @app.get("/health/live")
@@ -64,13 +66,15 @@ def health_ready() -> dict[str, object]:
         "status": "ready" if _selftest_results else "not_ready",
         "engine_versions": known_engine_versions(),
         "selftest_verified": bool(_selftest_results),
+        "provenance": provenance(),
     }
 
 
 @app.get("/capabilities")
 def capabilities() -> dict[str, object]:
-    """Advertises the optional batch-quote capability (vendor-neutral contract)."""
-    return {"quote_batch": {"schema_version": BATCH_SCHEMA_VERSION, "max_items": BATCH_MAX_ITEMS}}
+    """Advertises supported engine versions, the optional batch-quote
+    capability and non-sensitive provenance (vendor-neutral contract)."""
+    return capabilities_document()
 
 
 @app.post("/quote/batch", response_model=BatchQuoteResponse)

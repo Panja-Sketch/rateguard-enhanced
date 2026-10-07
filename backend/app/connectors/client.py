@@ -380,8 +380,17 @@ class ConnectorClient:
                     category=ConnectorFailureCategory.NON_RETRYABLE,
                     correlation_id=correlation_id,
                 )
+            if not entry.audience:
+                # Never fall back to deriving the audience from the (possibly
+                # traffic-tagged) endpoint: fail closed instead.
+                raise ConnectorException(
+                    code="CONNECTOR_AUTH_UNAVAILABLE",
+                    message="No ID-token audience is configured for the connector target.",
+                    category=ConnectorFailureCategory.NON_RETRYABLE,
+                    correlation_id=correlation_id,
+                )
             try:
-                id_tok = await asyncio.to_thread(_fetch_google_id_token, entry.base_url.rstrip("/"))
+                id_tok = await asyncio.to_thread(_fetch_google_id_token, entry.audience)
             except Exception as exc:  # noqa: BLE001 - never leak credential/library text
                 logger.warning(
                     "connector_id_token_unavailable correlation_id=%s error_type=%s",

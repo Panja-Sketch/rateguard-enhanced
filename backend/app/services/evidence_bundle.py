@@ -88,12 +88,12 @@ _GEMINI_FIELDS = (
 )
 _CONNECTOR_EVIDENCE_FIELDS = (
     "connector_id", "engine_version", "correlation_id", "connector_request_id", "request_sha256",
-    "response_sha256", "status", "final_premium", "error_code", "scenario_id", "probe_origin",
-    "calculation_date", "calculation_date_source",
+    "response_sha256", "status", "final_premium", "error_code", "error_class", "scenario_id",
+    "probe_origin", "calculation_date", "calculation_date_source",
 )
 _EXPERIMENT_FIELDS = (
     "experiment_id", "probe_name", "category", "risk_inputs", "expected_premium", "actual_premium", "matches",
-    "outcome", "inconclusive_reason", "calculation_date", "calculation_date_source", "probe_origin",
+    "outcome", "inconclusive_reason", "inconclusive_class", "calculation_date", "calculation_date_source", "probe_origin",
 )
 _EXPLANATION_FIELDS = (
     "explanation_id", "status", "source", "validated", "facts_sha256", "created_at", "reviewed_at",
@@ -112,6 +112,24 @@ def normalize_reason_codes(obj: Any) -> Any:
     if isinstance(obj, dict):
         return {k: normalize_reason_codes(v) for k, v in obj.items()}
     return obj
+
+
+_DEPLOYMENT_FIELDS = ("git_sha", "image_digest", "cloud_run_service", "cloud_run_revision")
+
+
+def _deployment_provenance(meta: dict[str, Any]) -> dict[str, Any]:
+    """Provenance of the process that EXECUTED the mission (recorded by the
+    worker at lease time); falls back to this process's environment only for
+    missions that predate that record."""
+    recorded = meta.get("execution_provenance")
+    if isinstance(recorded, dict):
+        return {f: recorded.get(f) for f in _DEPLOYMENT_FIELDS}
+    return {
+        "git_sha": os.environ.get("RATEGUARD_GIT_SHA"),
+        "image_digest": os.environ.get("RATEGUARD_IMAGE_DIGEST"),
+        "cloud_run_service": os.environ.get("K_SERVICE"),
+        "cloud_run_revision": os.environ.get("K_REVISION"),
+    }
 
 
 def build_sections(
@@ -182,12 +200,7 @@ def build_sections(
             "stage_outcomes": report.get("stage_outcomes", []),
         },
         "limitations.json": {"limitations": limitations},
-        "deployment.json": {
-            "git_sha": os.environ.get("RATEGUARD_GIT_SHA"),
-            "image_digest": os.environ.get("RATEGUARD_IMAGE_DIGEST"),
-            "cloud_run_service": os.environ.get("K_SERVICE"),
-            "cloud_run_revision": os.environ.get("K_REVISION"),
-        },
+        "deployment.json": _deployment_provenance(meta),
     }
 
 

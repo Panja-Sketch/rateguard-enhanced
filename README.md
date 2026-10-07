@@ -22,6 +22,8 @@ This repository (`rateguard-enhanced`) started from the public RateGuard AI base
 
 Everything below describes the enhanced version. The full change history is in `git log` and `docs/implementation/`.
 
+**Verified live (commit `f2df35d`, synthetic data):** the controlled AZ HO3 workbook compared with the independently deployed black-box rating engine over the versioned REST connector returns **PASS** for `canonical-v1` (11/11 probes match) and **BLOCK_DEPLOYMENT** for `defective-v1` (approved 700.00 vs deployed 655.00 at roof age 21, 22 and the control case). Revisions, digests and the full record are in [docs/demo/PRODUCTION_ACCEPTANCE_RECORD.md](docs/demo/PRODUCTION_ACCEPTANCE_RECORD.md).
+
 ## Positioning: RateGuard Complements Your Rating Platform, It Does Not Replace It
 
 > PricingCenter is where insurers author and configure rates. RateGuard is an independent assurance layer that
@@ -88,6 +90,7 @@ flowchart TB
     API["FastAPI API<br/>(Cloud Run: rateguard-api, public)"]
     Topic[["Pub/Sub topic<br/>assurance-runs"]]
     Worker["Worker<br/>(Cloud Run: rateguard-worker, private)"]
+    Engine["Demo Insurer Rating Engine<br/>(Cloud Run: rateguard-rating-engine, private)<br/>independent black-box REST engine"]
     Supervisor["AssuranceSupervisor<br/>(Google GenAI SDK)"]
     Gemini(("Gemini 3.1 Flash-Lite<br/>Vertex AI"))
     Engines["Deterministic Engines<br/>AST Diff · Dependency DAG · Premium Oracle<br/>Test Generator · Reconciliation · Portfolio SQL"]
@@ -105,18 +108,20 @@ flowchart TB
     Worker --> Supervisor
     Supervisor <-- "bounded, schema-validated calls<br/>(candidate IDs only, never raw values)" --> Gemini
     Supervisor --> Engines
+    Worker -- "versioned REST connector<br/>Google ID token, stable audience" --> Engine
     Engines --> BigQuery
     Engines --> GCS
     Supervisor -- evidence & result --> Firestore
     Supervisor --> Decision
     Firestore -. poll for status/result .-> Web
 
+    style Engine fill:#9a3412,stroke:#7c2d12,color:#fff
     style Gemini fill:#7c3aed,stroke:#4c1d95,color:#fff
     style Engines fill:#0369a1,stroke:#0c4a6e,color:#fff
     style Decision fill:#065f46,stroke:#022c22,color:#fff
 ```
 
-The API validates a mission request synchronously (~2ms), persists it as `QUEUED` in Firestore, and publishes an `AssuranceJob` to a Pub/Sub topic. A push subscription delivers it to the private worker, which acquires an atomic Firestore execution lease (so duplicate Pub/Sub delivery can never double-execute a mission) and runs the full pipeline asynchronously — mission execution never runs in-process inside the public API. The frontend never talks to Gemini or the worker directly; it only polls the API for mission status and the final result.
+The API validates a mission request synchronously (~2ms), persists it as `QUEUED` in Firestore, and publishes an `AssuranceJob` to a Pub/Sub topic. A push subscription delivers it to the private worker, which acquires an atomic Firestore execution lease (so duplicate Pub/Sub delivery can never double-execute a mission) and runs the full pipeline asynchronously — mission execution never runs in-process inside the public API. The frontend never talks to Gemini or the worker directly; it only polls the API for mission status and the final result. When Source B is a connector, only the API and worker service accounts can invoke the private rating-engine service (Cloud Run IAM); it is never publicly reachable.
 
 ## Key Features
 
@@ -248,17 +253,19 @@ The most differentiated part of RateGuard, and the part that answers "what makes
 
 **How it works:**
 
-1. **Registration, not a free-text URL.** RateGuard never accepts an arbitrary URL for a mission — only a connector an administrator has already registered (`app.connectors.registry`, `GET /connectors`). A registered connector declares a `connector_id`, `base_url`, its allowed `engine_version`s, and a `wire_format` (below). Registration today is config-driven — a new `ConnectorRegistryEntry` in `_build_registry()` plus a `base_url`/auth setting — deliberately not a database-backed CRUD admin UI (a persistent, mutable connector store is future work); adding a third connector requires no code changes outside that one function.
+1. **Registration, not a free-text URL.** RateGuard never accepts an arbitrary URL for a mission — only a connector an administrator has already registered (`app.connectors.registry`, `GET /connectors`). A registered connector declares a `connector_id`, `base_url`, its allowed `engine_version`s, a `wire_format` (below) and, for an authenticated private target, an explicit Google ID-token **audience** (the stable service URL, validated separately from the request endpoint and never derived from it; startup fails closed when it is missing or inconsistent). Registration today is config-driven — a new `ConnectorRegistryEntry` in `_build_registry()` plus a `base_url`/auth setting — deliberately not a database-backed CRUD admin UI (a persistent, mutable connector store is future work); adding a third connector requires no code changes outside that one function.
 2. **A wire-format adapter, not a hardcoded assumption of one shape.** `app.connectors.client` translates between RateGuard's own target-agnostic `ConnectorQuoteRequest`/`ConnectorQuoteResponse` contract and whatever wire shape a specific target expects, keyed by that connector's declared `wire_format`. Two are implemented today, proving the pattern generalizes rather than being coupled to one bundled demo:
    - **`rateguard_native_v1`** (`rating-engine-demo` connector) — a flat, snake_case `POST /quote` contract (`rating_engine.models.QuoteRequest`/`QuoteResponse`), with an optional `quote-batch-v1` capability for bulk portfolio scans.
    - **`vendor_gateway_v1`** (`vendor-gateway-demo` connector) — a genuinely different, nested/camelCase contract (`POST /vendor/rate-quote`, `{"policyRequest": {"correlationId", "productCode", "engineVersion", "asOfDate", "ratingFactors", ...}}` in, `{"policyResponse": {...}}` out) modeled on how a policy-admin-system-style vendor quote API is commonly shaped. It rates through the *exact same* deterministic engine as the native connector — the point being proven is that the client adapts to a different wire shape, not that a second pricing implementation exists — and deliberately advertises no batch capability, so a mission against it always exercises the bounded-concurrent single-quote fallback path. `tests/connectors/test_vendor_gateway_wire_format.py` asserts both connectors return identical premiums for identical inputs. Both connectors point at the same bundled `backend/rating_engine` demo service today purely to avoid standing up a second Cloud Run service for this deployment's scope; a real third-party target only needs its own `base_url` and (if its shape differs from both above) one new adapter pair in `client.py`.
+
+   The bundled engine ("RateGuard Demo Insurer Rating Engine") is a genuinely isolated black box: its own image, dependencies and service account, no import of any RateGuard code (enforced by tests), reached only over the versioned REST contract with a Google ID token minted for an explicitly configured audience. See [docs/architecture/VENDOR_NEUTRAL_RATING_ENGINE.md](docs/architecture/VENDOR_NEUTRAL_RATING_ENGINE.md) and the developer walkthrough [docs/demo/VENDOR_NEUTRAL_CONNECTOR_DEMO.md](docs/demo/VENDOR_NEUTRAL_CONNECTOR_DEMO.md). This proves the vendor-neutral REST integration pattern; it is not a certified native Guidewire or Duck Creek adapter.
 3. **Static diff is correctly skipped, not faked.** When Source B is a live connector there's no source code to AST-diff, so `Material Findings` reports `NOT_RUN` rather than a fabricated result. In its place:
    - **Boundary probes**: risk-directed test scenarios are executed against the connector and compared to the oracle's expected premium, per-probe.
    - **Connector Impact**: a full portfolio-scale batched-quote run (`quote-batch-v1` when advertised, otherwise bounded concurrent single quotes) reports coverage/mismatch/exposure statistics — undercharge/overcharge split, a lower-bound flag when coverage is partial, and renewal-window impact at 30/60/90 days.
    - **Cohort fairness screen**: mismatch rate broken out by `territory` and `construction_type`, with small-cohort suppression (n < 30) so a sparse cohort can't be singled out — explicitly labeled as a bias *screen*, not a legal finding of unfair discrimination.
    - **Honest inconclusive handling**: a connector failure, timeout, or partial response is never silently absorbed into PASS or reported as a proven mismatch — it forces `REVIEW_REQUIRED` with an explicit "N of M probes were inconclusive; this is not evidence of a pricing defect" explanation (locked doc 7.4).
 4. **Known limitations, stated honestly, not quietly:**
-   - Both bundled connectors serve one product/jurisdiction (AZ HO3) and one underlying demo engine; a third-party target with a genuinely different product schema needs its own `IPIR → Connector Request Adapter` mapping — right now the connector's `inputs` dict is passed through as-is from whatever the compiled IPIR source declares, so a source whose input IDs don't match the target's expected field names will see every probe come back `CONNECTOR_FAILURE` (correctly reported as inconclusive, never as a false pass — but also not yet a proven pricing conclusion). Building that mapping layer out per-connector is the next investment here.
+   - Both bundled connectors serve one product/jurisdiction (AZ HO3) and one underlying demo engine; a third-party target with a genuinely different product schema needs its own `IPIR → Connector Request Adapter` mapping — right now the connector's `inputs` dict is passed through as-is from whatever the compiled IPIR source declares, so a source whose input IDs don't match the target's expected field names (for example the generic `rateguard-workbook-sample.xlsx`, which is not contract-compatible with the AZ HO3 engine) will not produce valid comparisons. Use `data/samples/workbook_v1/canonical/AZ_HO3_GOLDEN_workbook.xlsx` with the demo engine. Failures are reported as inconclusive, never as a false pass, and are classified as `CONNECTOR_AUTH_DENIED`, `CONNECTOR_TIMEOUT`, `CONNECTOR_CONTRACT_ERROR`, `CONNECTOR_VERSION_UNSUPPORTED` or `CONNECTOR_UNAVAILABLE`. Building the per-connector mapping layer is the next investment here.
    - The 50,000-policy "blast radius" headline figure is proven at full coverage only for the compiled-source (static IPIR) path. A connector-backed portfolio scan's exposure figure is coverage-qualified and marked as a lower bound whenever coverage is partial (see `imp.exposure_is_lower_bound` in `app.agents.supervisor`) — the UI and evidence bundle state the actual coverage percentage rather than implying full-portfolio confidence.
 
 ## External API Access
@@ -278,7 +285,8 @@ This is off by default (`Settings.demo_api_key` is unset, so no header is ever a
 
 | Service | Role |
 | :--- | :--- |
-| **Cloud Run** | Hosts the public API (`rateguard-api`), the private worker (`rateguard-worker`, no public ingress), and the web frontend (`rateguard-web`) |
+| **Cloud Run** | Four services: the public API (`rateguard-api`), the private worker (`rateguard-worker`), the private demo rating engine (`rateguard-rating-engine`, its own image and zero-role service account) and the web frontend (`rateguard-web`) |
+| **Firebase Authentication** | Browser sign-in; the API verifies ID tokens server-side and assigns role and tenant from its own directory |
 | **Vertex AI (Gemini 3.1 Flash-Lite)** | Structured-decision reasoning via the Google GenAI SDK, authenticated via the runtime service account (no API key) |
 | **Cloud Pub/Sub** | Durable async job queue between the API and worker, with a bounded retry policy and a dead-letter topic/subscription for poison messages |
 | **Firestore** | Mission/run state, per-stage event log, and evidence records |
@@ -319,11 +327,14 @@ npm test
 
 ### Deployment
 
-Deployment to Google Cloud Run follows a staged pipeline, implemented in `infrastructure/`:
+Deployment to Google Cloud Run is a staged, guarded pipeline in `infrastructure/` (see [docs/operations/DEPLOYMENT_RUNBOOK.md](docs/operations/DEPLOYMENT_RUNBOOK.md) and [ROLLBACK_DR_RUNBOOK.md](docs/operations/ROLLBACK_DR_RUNBOOK.md)):
 
-1. `deploy_candidate_enhanced.sh --deploy-candidate` builds an immutable image and deploys it as a `--no-traffic --tag candidate` revision against fully isolated staging Pub/Sub/Firestore/BigQuery/GCS resources.
-2. `backend/scripts/verify_candidate.py --yes-test-candidate` exercises the candidate end-to-end (mission lifecycle, structured validation, CORS) against those isolated resources.
-3. Promotion is a separate, deliberate step (not part of candidate deployment): the exact verified image digest is deployed with the environment in `infrastructure/runtime-env.rateguard-enhanced.yaml`, then traffic is shifted via targeted `gcloud run services update-traffic` commands (rollback: `infrastructure/rollback.sh`), gated by a staging-name guard (`infrastructure/check_production_config.sh`) that refuses to proceed if a revision resolves to any staging-named resource.
+1. `deploy_candidate_enhanced.sh --deploy-candidate` builds immutable, full-SHA-tagged images and deploys four `--no-traffic --tag candidate` revisions (private worker and engine, dedicated service accounts, resource-scoped `run.invoker` only).
+2. `--prepare-verification` creates isolated, SHA-scoped Pub/Sub topics so no candidate mission can reach the production worker.
+3. One observed mission is run from the candidate web app (Sources page, with the `[CANDIDATE-VERIFY-<sha12>] ...` mission name), then `--complete-verification --mission-id=...` checks the terminal decision, the evidence bundle and manifest hashes, worker revision/digest/git SHA, controlled-workbook and REST-connector provenance, duplicate-delivery idempotency and that production subscriptions are byte-for-byte unchanged; `--record-verified` pins the four image digests.
+4. `promote_candidate_to_production.sh` refuses any candidate whose digests moved since verification, reuses those exact digests (no rebuild), repoints data-plane and connector settings at the stable production names and shifts traffic. Rollback is by revision (`infrastructure/rollback.sh`).
+
+Two known, non-blocking tooling limitations are documented in the runbook ("Known deployment-tooling limitations").
 
 ## Demo Steps
 
@@ -332,23 +343,31 @@ Deployment to Google Cloud Run follows a staged pipeline, implemented in `infras
 3. Run the same wizard again with the **clean control** target — expect `PASS` with zero diffs, and note the "Gemini not invoked by design" messaging.
 4. Pick **Equivalence** mode and run it — note that Material Findings, Blast Radius, and every other tab use neutral "Source A" / "Source B" language throughout, never "intent" or "defective." Open the **Alignment Options** tab: no directional patch exists yet (Gemini's decision there was the neutral `PROPOSE_ALIGNMENT_OPTIONS`, not a proposed fix) — pick either Source A or Source B as the reference to generate one on demand, then pick the other to see the patch flip direction.
 5. Visit **Sources**, download the two sample `.json` templates (or upload your own — see [Supported Source Format: JSON Schema](#supported-source-format-json-schema)), compile them for Source A and B, review the compilation receipt for each, and launch a mission from the real compiled sources.
-6. On **Sources**, download `rateguard-workbook-sample.xlsx`, compile it as Source A, then launch a **Release Conformance** mission with a registered connector as Source B (`rating-engine-demo`, engine `defective-v1`) — expect `BLOCK_DEPLOYMENT` with a connector-backed portfolio impact (affected policies, undercharge, 30/60/90-day renewals, cohort screen) and an exportable evidence bundle. Engine `canonical-v1` should `PASS`.
+6. **Vendor-neutral connector demo:** on **Sources**, upload and compile `data/samples/workbook_v1/canonical/AZ_HO3_GOLDEN_workbook.xlsx` as Source A, choose the `rating-engine-demo` connector with `canonical-v1` (expect `PASS`, 11/11 probes matching) and then `defective-v1` (expect `BLOCK_DEPLOYMENT`, 700.00 vs 655.00 at roof age 21, 22 and the control case). The optional **Mission name** field labels the run. Walkthrough: [docs/demo/VENDOR_NEUTRAL_CONNECTOR_DEMO.md](docs/demo/VENDOR_NEUTRAL_CONNECTOR_DEMO.md).
 7. Open the mission detail page and walk the tabs: Material Findings, Dependency DAG, Boundary Experiments, Reconciliation & RCA, Blast Radius, Remediation & Revalidation (Alignment Options in Equivalence mode), Evidence Lineage, and the Gemini Action Timeline.
 
 ## Results
 
-Results below come from the enhanced deployment (connector-backed missions against the bundled rating engine, synthetic data only). Mission IDs and figures are the ones recorded during live acceptance in [docs/implementation/STATUS.md](docs/implementation/STATUS.md).
+Results below come from the enhanced deployment (synthetic data only). Missions in the first table are the production acceptance runs recorded in [docs/demo/PRODUCTION_ACCEPTANCE_RECORD.md](docs/demo/PRODUCTION_ACCEPTANCE_RECORD.md); the second table is the connector-backed portfolio-impact acceptance recorded in [docs/implementation/STATUS.md](docs/implementation/STATUS.md).
 
 <!-- RESULTS-SCREENSHOTS-TODO: add the screenshots here. Save images in docs/media/ and reference them as ![alt](docs/media/<file>.png). -->
 
+**Production acceptance (commit `f2df35d`): controlled AZ HO3 workbook vs the black-box rating engine**
+
+| Mission | Selection | Decision | Key figures |
+| :--- | :--- | :--- | :--- |
+| `MIS-927A58D7` | golden workbook vs `canonical-v1` | `PASS` | 11/11 probes match, 0 inconclusive |
+| `MIS-63029F1E` | golden workbook vs `defective-v1` | `BLOCK_DEPLOYMENT` | Approved 700.00 vs deployed 655.00 at roof age 25 (control case), 21 and 22 |
+| `MIS-BC2F024B` | candidate verification, `defective-v1` | `BLOCK_DEPLOYMENT` | 8 match, 3 mismatch |
+
+**Connector-backed portfolio impact (50,000 synthetic policies)**
+
 | Scenario | Mission | Decision | Key figures |
 | :--- | :--- | :--- | :--- |
-| Clean workbook vs `canonical-v1` connector | `MIS-8DB4C882` | `PASS` | Impact `COMPLETE`; 37,533 eligible policies compared, 0 mismatches, 12,467 out of scope (effective dates outside the workbook's period) |
-| Clean workbook vs `defective-v1` connector | `MIS-BC3FDB58` | `BLOCK_DEPLOYMENT` | 13,446 affected policies, undercharge of $605,070.00 (every affected policy is $45.00 low); renewals affected within 30/60/90 days: 953 / 1,277 / 1,365; identical to the package-vs-package result on the same in-period policies |
-| `canonical-v1` with 15% injected transient faults | `MIS-71C2B921` | `REVIEW_REQUIRED` | Impact `PARTIAL`, coverage 66.88%, 4,726 inconclusive; an incomplete scan never passes |
-| `defective-v1` with injected faults | `MIS-102F8076` | `BLOCK_DEPLOYMENT` | Impact `PARTIAL`; exposure reported as a **lower bound** of $404,640.00 at 62.09% coverage |
-| Worker rollback mid-scan (disaster-recovery drill) | `MIS-210F8560` | `BLOCK_DEPLOYMENT` | Scan ended `PARTIAL` (228 of 250 batches); results not corrupted or double counted |
-| Final clean run after all drills | `MIS-4C39BD71` | `PASS` | Impact `COMPLETE` |
+| Clean workbook vs `canonical-v1` | `MIS-8DB4C882` | `PASS` | Impact `COMPLETE`; 37,533 eligible policies compared, 0 mismatches, 12,467 out of scope (effective dates outside the workbook's period) |
+| Clean workbook vs `defective-v1` | `MIS-BC3FDB58` | `BLOCK_DEPLOYMENT` | 13,446 affected policies, undercharge of $605,070.00 (every affected policy is $45.00 low); renewals within 30/60/90 days: 953 / 1,277 / 1,365 |
+| `canonical-v1` with 15% injected faults | `MIS-71C2B921` | `REVIEW_REQUIRED` | Impact `PARTIAL`, coverage 66.88%, 4,726 inconclusive; an incomplete scan never passes |
+| `defective-v1` with injected faults | `MIS-102F8076` | `BLOCK_DEPLOYMENT` | `PARTIAL`; exposure reported as a **lower bound** of $404,640.00 at 62.09% coverage |
 
 ### Demo Video
 
@@ -358,15 +377,12 @@ Not yet recorded for this version.
 
 ## Test Results
 
-Last verified run is recorded in [docs/implementation/STATUS.md](docs/implementation/STATUS.md) (2026-09-21, final worktree):
+Last full run, on the release commit (Windows, Python 3.12; details in the acceptance record):
 
-- **Backend:** ruff clean; about 1,158 pytest tests passing with the Firestore emulator required and no skips.
-- **Firestore security rules:** 130 of 130 passing, including the `impact_jobs` collection.
-- **Frontend:** typecheck, lint, production build, Jest 64 of 64, and Playwright 10 of 10.
-- **Repository secret scan:** `python scripts/secret_scan.py` reports clean.
-- **Live acceptance** (`backend/scripts/live_acceptance_p8.py`): the missions in the Results table above, plus authentication and RBAC checks (viewer 403 on export and create, cross-tenant 404, unauthenticated 401), CORS allow and deny, private worker and rating engine (403 unauthenticated), authenticated Pub/Sub push, rate limiting (5 successes then 429), and evidence-bundle hash verification.
-
-Counts change as tests are added; re-run `cd backend && pytest` and `cd frontend && npm test` for current numbers.
+- **Backend:** 1,441 tests passing with zero skips, including 67 that run against the Firestore emulator (`RATEGUARD_REQUIRE_EMULATOR=1` turns a missing emulator into a failure). Coverage includes mission lifecycle and validation, the Gemini supervisor and its fallbacks, Pub/Sub worker idempotency, tenant isolation, the connector client (SSRF, redirect refusal, ID-token audience, retry classification), the isolated rating engine (import isolation, contract, exact parity with the independent oracle for both versions across roof ages 0-120), the four vendor-neutral scenarios through the real API path, and the deployment/verification scripts.
+- **Frontend:** `tsc --noEmit`, `next lint` and the production build are clean; 93 Jest tests and 16 Playwright browser tests pass.
+- **Repository checks:** `ruff` clean, secret scan clean, shell scripts pass `bash -n`.
+- **Live acceptance on production** (commit `f2df35d`): golden workbook vs `canonical-v1` -> `PASS`; vs `defective-v1` -> `BLOCK_DEPLOYMENT`. Evidence bundles verified (manifest hashes, worker revision/digest/git SHA, connector provenance, no secrets or PII). See [docs/demo/PRODUCTION_ACCEPTANCE_RECORD.md](docs/demo/PRODUCTION_ACCEPTANCE_RECORD.md) and `docs/demo/DEPLOYED_ACCEPTANCE_TEST.md`.
 
 ## Conservative Release Decision
 
@@ -387,7 +403,7 @@ A pricing-assurance tool that reports a false `PASS` is worse than one that repo
 
 ## Limitations
 
-Prompt 8 additions to the honest limitations list: the connector-backed scan excludes policies whose effective date is outside the authoritative source's effective period (reported as *out of scope*, not priced); single-quote-only connectors need `≈ rows / QPS` seconds for a 50,000-row scan and may end `PARTIAL`; the demo rating engine's fault injection is a demo-only hook; the API-level rate limits and 3-way autoscaling caps are challenge defaults. See [docs/implementation/STATUS.md](docs/implementation/STATUS.md) for the classified list.
+Connector-related limitations: the connector-backed scan excludes policies whose effective date is outside the authoritative source's effective period (reported as *out of scope*, not priced); single-quote-only connectors need `≈ rows / QPS` seconds for a 50,000-row scan and may end `PARTIAL`; the demo rating engine's fault injection is a demo-only hook; the API-level rate limits and 3-way autoscaling caps are challenge defaults; the portfolio-analysis stage is a long synchronous computation (several minutes on the full 50,000-policy portfolio), so the mission page can show a stale-heartbeat notice while it runs. See [docs/implementation/STATUS.md](docs/implementation/STATUS.md) for the classified list.
 
 RateGuard is scoped to what it can verify end-to-end, not what would look impressive unverified:
 
@@ -421,7 +437,7 @@ backend/            FastAPI application, agents, deterministic engines, tests
     models/          Pydantic domain models
     services/        Validation, remediation, evidence bundle, mission services
     storage/         Firestore, BigQuery, GCS and local/in-memory stores
-  rating_engine/     Separate demo rating-engine service (canonical and defective engine versions, vendor-gateway wire format)
+  rating_engine/     Independent black-box demo rating engine (own image; imports nothing from app/; canonical and defective versions, vendor-gateway wire format)
   scripts/           Fixture generators, demo runners, candidate/deployment verification, live acceptance
   tests/             Unit, API, auth, connector, impact, ingestion, agent and integration suites
 frontend/            Next.js 14 (App Router) + TypeScript + Tailwind web UI

@@ -99,7 +99,7 @@ export default function PositioningPage() {
     <div className="space-y-10 max-w-5xl mx-auto">
       <div>
         <h1 className="text-2xl sm:text-3xl font-extrabold text-white flex items-center gap-2">
-          <ShieldCheck className="h-7 w-7 text-sky-400" /> How RateGuard Complements Guidewire PricingCenter
+          <ShieldCheck className="h-7 w-7 text-sky-400" /> How RateGuard Complements Rating Platforms and Engines
         </h1>
         <p className="text-sm text-slate-300 mt-3 leading-relaxed max-w-3xl">
           PricingCenter is where insurers author and configure rates. RateGuard is an independent assurance layer

@@ -132,6 +132,9 @@ export async function installMocks(page: Page, opts: MockOptions = {}): Promise<
     if (url.pathname === '/api/v1/me') {
       return json(route, 200, { uid: 'e2e-uid', email: TEST_EMAIL, tenant_id: 'rateguard-demo', role: opts.role ?? 'RELEASE_OWNER' });
     }
+    if (url.pathname === '/api/v1/missions' && request.method() === 'GET' && opts.extraGet && url.pathname in opts.extraGet) {
+      return json(route, 200, opts.extraGet[url.pathname]);
+    }
     if (url.pathname === '/api/v1/missions' && request.method() === 'GET') {
       const status = opts.missionsStatus ?? 200;
       if (status === 401) return json(route, 401, { detail: { code: 'INVALID_TOKEN', message: 'token detail that must not be shown' } });

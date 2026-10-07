@@ -60,6 +60,15 @@ class Settings(BaseSettings):
     # (audience = the connector's base URL) minted from the runtime service
     # account via ADC, for a private Cloud Run target. No secret is stored.
     rating_engine_connector_auth_mode: str = "none"
+    # Google ID-token audience for `google_id_token` auth: the STABLE (untagged)
+    # HTTPS service URL of the target. It is configured explicitly and is never
+    # derived from the request endpoint, because a candidate endpoint is a
+    # traffic-tagged URL (`<tag>---<service>...`) while Cloud Run validates the
+    # token against the service URL. Validated at startup and on registration.
+    rating_engine_connector_audience: str | None = None
+    # Audience for the "vendor-gateway-demo" entry; falls back to the value above
+    # (the same demo service exposes both wire shapes).
+    vendor_gateway_connector_audience: str | None = None
     # Base URL for the second, differently-wire-shaped demo connector
     # ("vendor-gateway-demo", see app/connectors/registry.py). Defaults to
     # `rating_engine_connector_base_url` (the same demo service exposes
